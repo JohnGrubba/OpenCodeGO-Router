@@ -1,0 +1,44 @@
+name: opencode-go-router
+
+services:
+  router:
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-latest}
+    image: opencode-go-router:${VERSION:-latest}
+    container_name: opencode-go-router
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /data
+      ADDR: :4000
+    ports:
+      - "4000:4000"
+    volumes:
+      - router-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4000/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  router-data:
+    name: opencode-go-router-data

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#08090c">
+  <meta name="robots" content="noindex,nofollow">
+  <title>OpenCode Go Router</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div id="login" class="login" hidden>
+    <div class="login-glow"></div>
+    <main class="login-card">
+      <div class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32"><path d="M8 6l8 4.6L24 6v13.2L16 24l-8-4.8V6z"/><path d="M16 10.6V24"/></svg>
+      </div>
+      <h1 id="login-title">OpenCode Go Router</h1>
+      <p class="login-sub" id="login-sub">Sign in to manage keys and usage.</p>
+      <form id="login-form" autocomplete="on">
+        <div class="field">
+          <label for="password">Admin password</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+        </div>
+        <button class="btn primary full" id="login-btn" type="submit">Sign in</button>
+        <div class="form-error" id="login-error" role="alert"></div>
+      </form>
+      <div class="login-foot">
+        <span class="dot ok"></span>
+        <span>Your keys and usage stay on this server.</span>
+      </div>
+    </main>
+  </div>
+
+  <div id="app" class="app" hidden>
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark small" aria-hidden="true">
+          <svg viewBox="0 0 32 32"><path d="M8 6l8 4.6L24 6v13.2L16 24l-8-4.8V6z"/><path d="M16 10.6V24"/></svg>
+        </div>
+        <div class="brand-text">
+          <strong>Go Router</strong>
+          <span>OpenCode usage gateway</span>
+        </div>
+      </div>
+      <nav class="nav" aria-label="Main">
+        <a class="nav-item" href="#/overview" data-nav="overview">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+          <span>Overview</span>
+        </a>
+        <a class="nav-item" href="#/keys" data-nav="keys">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 4l4 4M14 6l4 4"/></svg>
+          <span>Keys</span>
+        </a>
+        <a class="nav-item" href="#/activity" data-nav="activity">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2.5-7 5 14L17 12h4"/></svg>
+          <span>Activity</span>
+        </a>
+        <a class="nav-item" href="#/models" data-nav="models">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></svg>
+          <span>Models</span>
+        </a>
+        <a class="nav-item" href="#/settings" data-nav="settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></svg>
+          <span>Settings</span>
+        </a>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="plan-badge" id="plan-badge">
+          <span class="dot ok"></span>
+          <span id="plan-label">Go plan</span>
+        </div>
+        <button class="btn ghost small full" id="logout-btn" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/></svg>
+          Sign out
+        </button>
+      </div>
+    </aside>
+    <div class="main">
+      <header class="topbar">
+        <div class="topbar-title">
+          <div class="crumb" id="crumb">Overview</div>
+          <h1 id="page-title">Usage</h1>
+        </div>
+        <div class="topbar-actions" id="topbar-actions"></div>
+      </header>
+      <section id="view" class="view" aria-live="polite"></section>
+      <footer class="footer">
+        <span>OpenCode Go Router <span id="version-label"></span></span>
+        <span id="uptime-label"></span>
+      </footer>
+    </div>
+  </div>
+
+  <div id="modal-root"></div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+</body>
+</html>
