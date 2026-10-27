@@ -8,7 +8,6 @@
     settings: null,
     models: null,
     modelsAt: 0,
-    setup: null,
     route: { name: 'overview', id: null },
     range: '24h',
     plan: 'go',
@@ -61,7 +60,7 @@
     return new Date(ts * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   }
   function relTime(ts) {
-    if (!ts) return 'Never';
+    if (!ts || ts <= 0) return 'Never';
     const delta = ts - Date.now() / 1000;
     if (delta > 45) {
       const d = delta;
@@ -153,6 +152,18 @@
     ta.select();
     try { document.execCommand('copy'); done(); } catch { toast('Could not copy', 'error'); }
     ta.remove();
+  }
+
+  function downloadText(filename, text) {
+    const blob = new Blob([text], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename || 'opencode.jsonc';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
   }
 
   const icons = {
@@ -661,7 +672,7 @@
     if (!ok) return;
     try {
       const res = await api('/keys/' + encodeURIComponent(key.id) + '/rotate', { method: 'POST' });
-      showSecret(res.secret, key, 'Secret rotated');
+      showSecret(res.secret, key, 'Secret rotated', res.client_config_text, res.client_config_filename);
       route();
     } catch (ex) { toast(ex.message, 'error'); }
   }
@@ -841,7 +852,7 @@
         } else {
           const res = await api('/keys', { method: 'POST', body: payload });
           closeModal();
-          showSecret(res.secret, res.key, 'Key created');
+          showSecret(res.secret, res.key, 'Key created', res.client_config_text, res.client_config_filename);
           route();
         }
       } catch (ex) {
@@ -887,54 +898,43 @@
     el.textContent = msg;
   }
 
-  async function openKeyConfig(key) {
-    let setup;
-    try { setup = await api('/setup?key=' + encodeURIComponent(key.id)); } catch (ex) { toast(ex.message, 'error'); return; }
+  function openKeyConfig(key) {
     openModal({
       title: 'Client config for ' + key.name,
-      subtitle: 'Only models allowed for this key are included.',
-      wide: true,
+      subtitle: 'The config embeds this key, so there are no environment variables.',
       body: `<div class="stack">
-        <div class="callout accent">${icon('check')}<div>Save this as <span class="mono">${esc(setup.config_path_hint)}</span>, then export the key and run the client.</div></div>
-        <div class="field"><label>Environment</label><div class="code-block"><pre>${esc('export ' + setup.env_var + '="ocgr_..."')}</pre></div></div>
-        <div class="field"><label>opencode.jsonc</label><div class="code-block"><pre>${esc(setup.opencode_jsonc)}</pre><button class="btn small copy-corner" data-copy-key-cfg>${icon('copy')}</button></div></div>
-        <div class="field"><label>Try it</label><div class="code-block"><pre>${esc(setup.example_command)}</pre></div></div>
+        <div class="callout warn">${icon('alert')}<div>For security, the finished config is shown only when a key is created or rotated. The server stores only a hash of the secret, so it cannot regenerate the old file.</div></div>
+        <div class="callout accent">${icon('key')}<div>Rotate this key to get a new secret plus a ready-to-download <span class="mono">opencode.jsonc</span>. The old secret stops working immediately; limits, models and history stay the same.</div></div>
       </div>`,
-      footer: `<button class="btn primary" data-close>Done</button>`,
+      footer: `<button class="btn ghost" data-close>Cancel</button><button class="btn primary" data-rotate-config>${icon('rotate')} Rotate & get config</button>`,
       onMount: (modal) => {
-        $('[data-copy-key-cfg]', modal).addEventListener('click', () => copyText(setup.opencode_jsonc, 'Config copied'));
+        $('[data-rotate-config]', modal).addEventListener('click', () => {
+          closeModal();
+          rotateKey(key);
+        });
       },
     });
   }
 
-  function showSecret(secret, key, title) {
+  function showSecret(secret, key, title, configText, filename) {
     const name = key?.name || 'this key';
-    const cmd = `export OPENCODE_GO_KEY="${secret}"`;
+    const cfg = configText || '';
     openModal({
       title: title || 'Your new API key',
-      subtitle: `Copy it now — the secret is not stored in readable form.`,
+      subtitle: 'The key and the finished opencode config are shown only once.',
+      wide: true,
       body: `<div class="stack">
         <div class="callout warn">${icon('alert')}<div>This secret is shown only once. Store it in a password manager or hand it to ${esc(name)} now.</div></div>
         <div class="field"><label>Secret</label><div class="secret-box"><span class="grow">${esc(secret)}</span><button class="btn small" data-copy-secret>${icon('copy')} Copy</button></div></div>
-        <div class="field"><label>Client environment</label><div class="code-block"><pre>${esc(cmd)}</pre><button class="btn small copy-corner" data-copy-env>${icon('copy')}</button></div></div>
-        <div class="field"><label>Client config for this key</label><div id="secret-config"><div class="skeleton" style="height:80px"></div></div></div>
-        <div class="callout">${icon('key')}<div>Open <a href="#/settings" data-close style="color:var(--accent)">Settings → Client setup</a> to copy the matching <span class="mono">opencode.jsonc</span> config. Then run <span class="mono">opencode run --model go/kimi-k3 "hello"</span>.</div></div>
+        ${cfg ? `<div class="field"><label>opencode.jsonc — ready to use, key already embedded</label><div class="code-block has-actions"><pre>${esc(cfg)}</pre><div class="row" style="position:absolute;top:7px;right:7px;gap:6px"><button class="btn small" data-copy-config>${icon('copy')} Copy</button><button class="btn small primary" data-download-config>${icon('download')} Download</button></div></div></div>
+        <div class="callout accent">${icon('check')}<div>Save the file as <span class="mono">~/.config/opencode/opencode.jsonc</span>, then run <span class="mono">opencode run --model go/kimi-k3 "hello"</span>. No environment variables are needed.</div></div>
+        <div class="callout warn">${icon('alert')}<div>The config contains the secret in plaintext. Keep it private and run <span class="mono">chmod 600 ~/.config/opencode/opencode.jsonc</span>.</div></div>` : `<div class="callout danger">${icon('alert')}<div>The server could not generate the client config. Rotate the key to try again.</div></div>`}
       </div>`,
-      footer: `<button class="btn primary" data-close>Done</button>`,
+      footer: `${cfg ? `<button class="btn primary" data-download-config>${icon('download')} Download config</button>` : ''}<button class="btn ghost" data-close>Done</button>`,
       onMount: (modal) => {
         $('[data-copy-secret]', modal).addEventListener('click', () => copyText(secret, 'Secret copied'));
-        $('[data-copy-env]', modal).addEventListener('click', () => copyText(cmd, 'Command copied'));
-        if (key?.id) {
-          api('/setup?key=' + encodeURIComponent(key.id)).then((setup) => {
-            const box = $('#secret-config', modal);
-            if (!box) return;
-            box.innerHTML = `<div class="code-block"><pre>${esc(setup.opencode_jsonc)}</pre><button class="btn small copy-corner" data-copy-key-cfg>${icon('copy')}</button></div>`;
-            $('[data-copy-key-cfg]', box).addEventListener('click', () => copyText(setup.opencode_jsonc, 'Config copied'));
-          }).catch(() => {
-            const box = $('#secret-config', modal);
-            if (box) box.innerHTML = '<div class="tiny faint">Open Settings → Client setup to copy the config.</div>';
-          });
-        }
+        $$('[data-copy-config]', modal).forEach((b) => b.addEventListener('click', () => copyText(cfg, 'Config copied')));
+        $$('[data-download-config]', modal).forEach((b) => b.addEventListener('click', () => downloadText(filename || 'opencode.jsonc', cfg)));
       },
     });
   }
@@ -985,7 +985,7 @@
           <div class="card pad-0">
             <div class="row between" style="padding:16px 18px;border-bottom:1px solid var(--border)"><div><div class="card-title">Recent requests</div><div class="card-sub">Latest activity for this key</div></div><a class="card-link" href="#/activity">Full log ${icon('external')}</a></div>
             ${(data.recent || []).length ? `<div class="table-wrap"><table><thead><tr><th>Time</th><th>Model</th><th>Status</th><th class="num">Tokens</th><th class="num">Spend</th><th class="num">Latency</th></tr></thead><tbody>
-              ${data.recent.map((r) => `<tr class="${r.status >= 400 ? 'error-row' : ''}"><td class="muted nowrap">${fmtDateTime(r.created_at)}</td><td>${esc(modelName(r.model))}</td><td>${requestStatus(r)}</td><td class="num">${fmtTokens(r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_write_tokens)}</td><td class="num">${fmtMoney(r.cost)}</td><td class="num muted">${fmtDur(r.duration_ms)}</td></tr>`).join('')}
+              ${data.recent.map((r) => `<tr class="${r.status >= 400 ? 'error-row' : ''}"><td class="muted nowrap">${fmtDateTime(r.created_at)}</td><td>${esc(modelName(r.model))}</td><td>${requestStatus(r)}</td><td class="num">${fmtTokens(r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_write_tokens)}</td><td class="num">${fmtMoney(r.cost)}${r.estimated ? '<div class="tiny color-warn">est.</div>' : ''}</td><td class="num muted">${fmtDur(r.duration_ms)}</td></tr>`).join('')}
             </tbody></table></div>` : emptyState('No requests yet', 'This key has not been used.')}
           </div>
         </div>
@@ -1132,7 +1132,7 @@
           <td>${esc(modelName(r.model))}</td>
           <td>${requestStatus(r)}</td>
           <td class="num"><span class="cell-main">${fmtTokens(tokens)}</span><div class="cell-sub">${fmtTokens(r.input_tokens)} in / ${fmtTokens(r.output_tokens)} out</div></td>
-          <td class="num">${fmtMoney(r.cost)}</td>
+          <td class="num">${fmtMoney(r.cost)}${r.estimated ? '<div class="tiny color-warn">estimate</div>' : ''}</td>
           <td class="num muted">${fmtDur(r.duration_ms)}</td>
         </tr>`;
       }).join('');
@@ -1153,6 +1153,7 @@
     const models = modelsData.models || [];
     const byId = new Map(models.map((m) => [m.id, m]));
     const rows = planData.models || [];
+    const peakModels = models.filter((m) => m.peak && !m.deprecated);
     const totalPct = planData.totals.limit ? (planData.totals.used / planData.totals.limit) * 100 : 0;
 
     $('#topbar-actions').innerHTML = `
@@ -1177,6 +1178,8 @@
         <div class="tiny faint" style="margin-top:10px">These bars show your recent usage against the plan limits; they are not the limits you set on sub-keys. Summing monthly limits is only a rough overview because each model has its own bucket.</div>
       </div>
 
+      ${peakModels.length ? `<div class="callout warn">${icon('alert')}<div><strong>Peak pricing:</strong> ${peakModels.map((m) => `${esc(m.name)} ${m.peak.multiplier}× (${esc((m.peak.windows || []).join(' / '))} ${esc(m.peak.days)} ${esc(m.peak.timezone)})`).join('; ')}. Usage, limits and plan bars use the allowance reported by Go, so peak pricing is already included. The router's local fallback estimate applies the same multiplier.</div></div>` : ''}
+
       <div class="card pad-0">
         <div class="row between wrap" style="padding:16px 18px;border-bottom:1px solid var(--border)">
           <div><div class="card-title">Plan usage by model</div><div class="card-sub">Rolling 5h / 7d / 30d windows</div></div>
@@ -1196,7 +1199,7 @@
           <thead><tr><th>Model</th><th>API family</th><th class="num">Context</th><th class="num">Input</th><th class="num">Output</th><th>Status</th></tr></thead>
           <tbody>
             ${models.filter((m) => !m.deprecated).map((m) => `<tr>
-              <td><div class="cell-main">${esc(m.name)}</div><div class="cell-sub mono">${esc(m.id)}</div></td>
+              <td><div class="cell-main">${esc(m.name)}</div><div class="cell-sub mono">${esc(m.id)}</div>${m.peak ? `<div class="tiny color-warn" style="margin-top:4px">Peak ${m.peak.multiplier}× · ${esc((m.peak.windows || []).join(' / '))} ${esc(m.peak.days)} ${esc(m.peak.timezone)}</div>` : ''}</td>
               <td><span class="badge ${m.api_family === 'messages' ? 'violet' : m.api_family === 'google' ? 'warn' : m.api_family === 'responses' ? 'accent' : ''}">${esc(familyLabel(m.api_family))}</span></td>
               <td class="num">${fmtTokens(m.context)}</td>
               <td class="num">${fmtMoneyExact(m.cost.input)}</td>
@@ -1239,7 +1242,7 @@
       <td><div class="cell-main">${esc(r.name)}</div><div class="cell-sub mono">${esc(r.id)}</div></td>
       <td>${m ? `<span class="badge ${m.api_family === 'messages' ? 'violet' : m.api_family === 'google' ? 'warn' : m.api_family === 'responses' ? 'accent' : ''}">${esc(familyLabel(m.api_family))}</span>` : '—'}</td>
       <td class="num">${m ? fmtTokens(m.context) : '—'}</td>
-      <td class="num">${m ? `<span class="tiny muted">${fmtMoneyExact(m.cost.input)} / ${fmtMoneyExact(m.cost.output)}</span>` : '—'}</td>
+      <td class="num">${m ? `<span class="tiny muted">${fmtMoneyExact(m.cost.input)} / ${fmtMoneyExact(m.cost.output)}</span>${m.peak ? `<div class="tiny color-warn">peak ${m.peak.multiplier}×</div>` : ''}` : '—'}</td>
       ${bars.map(([label, b]) => {
         const p = pct(b.used, b.limit);
         return `<td style="min-width:130px"><div class="row between" style="gap:8px"><span class="tiny faint">${fmtMoney(b.used)} / ${fmtMoney(b.limit)}</span><span class="tiny ${p >= 80 ? 'color-warn' : 'faint'}">${Math.round(p)}%</span></div><div class="bar ${barClass(p)}" style="margin-top:5px"><span style="width:${p.toFixed(1)}%"></span></div></td>`;
@@ -1249,16 +1252,16 @@
 
   // ---------- settings ----------
   async function renderSettings() {
-    const [settings, setup] = await Promise.all([api('/settings'), api('/setup')]);
+    const settings = await api('/settings');
+    let models = state.models || [];
+    try { models = await loadModels(); } catch { /* keep settings usable */ }
     state.settings = settings;
-    state.setup = setup;
     state.plan = settings.plan;
     $('#plan-label').textContent = planLabel(settings.plan) + ' plan';
     $('#version-label').textContent = 'v' + (settings.version || '');
     $('#topbar-actions').innerHTML = `<button class="btn icon" data-refresh title="Refresh">${icon('refresh')}</button>`;
 
     const upstream = settings.upstream || {};
-    const cfg = setup.opencode_jsonc || '';
     $('#view').innerHTML = `<div class="stack">
       <div class="grid cols-2">
         <div class="card">
@@ -1276,7 +1279,7 @@
         <div class="card">
           <div class="card-head"><div><div class="card-title">Upstream</div><div class="card-sub">Your OpenCode Go connection</div></div><span class="badge ${upstream.configured ? 'ok' : 'danger'}">${upstream.configured ? 'configured' : 'missing key'}</span></div>
           <div class="kv"><span class="k">Base URL</span><span class="v mono tiny">${esc(upstream.base_url || '—')}</span></div>
-          <div class="kv"><span class="k">API key</span><span class="v">${upstream.configured ? 'Set via environment' : 'Not set'}</span></div>
+          <div class="kv"><span class="k">API key</span><span class="v">${upstream.configured ? 'Set via server environment' : 'Not set'}</span></div>
           <div class="kv"><span class="k">Models refreshed</span><span class="v">${upstream.fetched_at ? relTime(upstream.fetched_at) : 'Not yet'}</span></div>
           <div class="kv"><span class="k">Public URL</span><span class="v mono tiny">${esc(settings.public_url)}</span></div>
           <div class="kv"><span class="k">Trust proxy headers</span><span class="v">${settings.trust_proxy ? 'Yes' : 'No'}</span></div>
@@ -1299,15 +1302,15 @@
       </div>
 
       <div class="card">
-        <div class="card-head"><div><div class="card-title">Client setup</div><div class="card-sub">Official opencode v2 client</div></div><button class="btn small" data-copy-config>${icon('copy')} Copy config</button></div>
-        <div class="stack" style="gap:10px">
-          <div class="callout accent">${icon('check')}<div>This provider config is generated for <span class="mono">${esc(settings.public_url)}</span>. Place it at <span class="mono">${esc(setup.config_path_hint)}</span>, export your key, then run the client.</div></div>
-          <div class="form-row">
-            <div class="field"><label>Install</label><div class="code-block"><pre>${esc(setup.install_command)}</pre></div></div>
-            <div class="field"><label>Environment</label><div class="code-block"><pre>${esc('export ' + setup.env_var + '="ocgr_..."')}</pre></div></div>
+        <div class="card-head"><div><div class="card-title">Client setup</div><div class="card-sub">Finished configs with the key already embedded</div></div><div class="row"><a class="btn small ghost" href="#/keys">Open keys</a><button class="btn small primary" data-settings-create>${icon('plus')} Create key</button></div></div>
+        <div class="stack" style="gap:12px">
+          <div class="callout accent">${icon('check')}<div>Each key gets its own ready-to-use <span class="mono">opencode.jsonc</span> when it is <strong>created or rotated</strong>. The key is baked into the provider settings, so there are no environment variables to set.</div></div>
+          <div class="grid cols-2" style="gap:12px">
+            <div class="field"><label>1. Install the client</label><div class="code-block"><pre>curl -fsSL https://opencode.ai/v2/install | bash</pre></div></div>
+            <div class="field"><label>2. Run a model</label><div class="code-block"><pre>opencode run --model go/kimi-k3 "hello"</pre></div></div>
           </div>
-          <div class="field"><label>opencode.jsonc</label><div class="code-block"><pre>${esc(cfg)}</pre><button class="btn small copy-corner" data-copy-config>${icon('copy')}</button></div></div>
-          <div class="field"><label>Try it</label><div class="code-block"><pre>${esc(setup.example_command)}</pre></div></div>
+          <div class="callout">${icon('key')}<div>Create a key, then use <strong>Download config</strong> in the one-time secret dialog. Save it as <span class="mono">~/.config/opencode/opencode.jsonc</span>. Already have a key but lost the file? Open the key and choose <strong>Client config → Rotate &amp; get config</strong>.</div></div>
+          <div class="callout warn">${icon('alert')}<div>The config contains the key in plaintext. Treat it like a password and use <span class="mono">chmod 600</span> on the file.</div></div>
         </div>
       </div>
 
@@ -1325,7 +1328,7 @@
           <div class="kv"><span class="k">Version</span><span class="v mono">${esc(settings.version)}</span></div>
           <div class="kv"><span class="k">Session lifetime</span><span class="v">${settings.session_ttl_hours} hours</span></div>
           <div class="kv"><span class="k">Retention</span><span class="v">${settings.retention_days} days</span></div>
-          <div class="kv"><span class="k">Models available</span><span class="v">${setup.model_count}</span></div>
+          <div class="kv"><span class="k">Models available</span><span class="v">${(models || []).filter((m) => !m.deprecated).length}</span></div>
         </div>
       </div>
     </div>`;
@@ -1357,8 +1360,8 @@
     $('[data-refresh-models]')?.addEventListener('click', async () => {
       try { await api('/models/refresh', { method: 'POST' }); state.models = null; state.modelsAt = 0; toast('Model list refreshed', 'ok'); route(); } catch (ex) { toast(ex.message, 'error'); }
     });
-    $$('[data-copy-config]').forEach((b) => b.addEventListener('click', () => copyText(cfg, 'Config copied')));
     $('[data-refresh]')?.addEventListener('click', route);
+    $('[data-settings-create]')?.addEventListener('click', () => openKeyModal(null));
   }
 
   // ---------- modal ----------

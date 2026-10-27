@@ -252,3 +252,15 @@ func TestProxyUpstreamError(t *testing.T) {
 		t.Fatalf("error request not recorded: %+v", rows)
 	}
 }
+
+func TestProxyMissingModel(t *testing.T) {
+	p, st, _ := testProxy(t)
+	secret := makeKey(t, st, []string{"*"}, nil)
+	w := do(p, http.MethodPost, "/go/openai/v1/chat/completions", secret, `{"messages":[]}`, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Missing model") {
+		t.Fatalf("missing model error not returned: %s", w.Body.String())
+	}
+}

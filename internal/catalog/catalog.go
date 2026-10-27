@@ -20,23 +20,32 @@ type Cost struct {
 	CacheWrite float64 `json:"cache_write"`
 }
 
+// PeakInfo describes published peak-hour pricing.
+type PeakInfo struct {
+	Multiplier float64  `json:"multiplier"`
+	Windows    []string `json:"windows"`
+	Days       string   `json:"days"`
+	Timezone   string   `json:"timezone"`
+}
+
 // Model describes one upstream model.
 type Model struct {
-	ID            string  `json:"id"`
-	Name          string  `json:"name"`
-	Family        string  `json:"family"`
-	Package       string  `json:"package"`
-	APIFamily     string  `json:"api_family"`
-	Reasoning     bool    `json:"reasoning"`
-	ToolCall      bool    `json:"tool_call"`
-	Context       int64   `json:"context"`
-	InputLimit    int64   `json:"input_limit"`
-	OutputLimit   int64   `json:"output_limit"`
-	Cost          Cost    `json:"cost"`
-	Deprecated    bool    `json:"deprecated"`
-	GoMonthly     float64 `json:"go_monthly"`
-	GoPlusMonthly float64 `json:"go_plus_monthly"`
-	Live          bool    `json:"live,omitempty"`
+	ID            string    `json:"id"`
+	Name          string    `json:"name"`
+	Family        string    `json:"family"`
+	Package       string    `json:"package"`
+	APIFamily     string    `json:"api_family"`
+	Reasoning     bool      `json:"reasoning"`
+	ToolCall      bool      `json:"tool_call"`
+	Context       int64     `json:"context"`
+	InputLimit    int64     `json:"input_limit"`
+	OutputLimit   int64     `json:"output_limit"`
+	Cost          Cost      `json:"cost"`
+	Deprecated    bool      `json:"deprecated"`
+	GoMonthly     float64   `json:"go_monthly"`
+	GoPlusMonthly float64   `json:"go_plus_monthly"`
+	Peak          *PeakInfo `json:"peak,omitempty"`
+	Live          bool      `json:"live,omitempty"`
 }
 
 var (

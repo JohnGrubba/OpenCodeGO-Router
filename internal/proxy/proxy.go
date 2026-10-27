@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -129,6 +130,34 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, family, http.StatusForbidden, fmt.Sprintf("Model %q is not allowed for this API key.", model), "permission_error")
 		return
 	}
+	if model == "" {
+		fields := []any{
+			"endpoint", canonical,
+			"method", r.Method,
+			"body_bytes", len(body),
+			"content_type", r.Header.Get("Content-Type"),
+			"content_encoding", r.Header.Get("Content-Encoding"),
+			"session", r.Header.Get("X-Opencode-Session"),
+		}
+		if len(body) > 0 {
+			var payload map[string]json.RawMessage
+			if json.Unmarshal(body, &payload) == nil {
+				keys := make([]string, 0, len(payload))
+				for k := range payload {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				fields = append(fields, "json_keys", keys)
+			} else {
+				fields = append(fields, "json", "invalid")
+			}
+		}
+		p.log.Warn("proxied request has no model", fields...)
+	}
+	if model == "" {
+		writeError(w, family, http.StatusBadRequest, "Missing model in request body. Use the final https:// base URL in opencode.jsonc: an HTTP-to-HTTPS redirect turns POST into GET and drops the body.", "invalid_request_error")
+		return
+	}
 
 	statuses, blocked := p.tracker.Check(key.ID, key.Limits, now)
 	if blocked {
@@ -218,7 +247,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	meta, _ := p.models.Lookup(model)
-	captured.Finalize(family, meta)
+	captured.FinalizeAt(family, meta, start)
 	if upstream.StatusCode >= 400 {
 		captured.Cost = 0
 		captured.Allowance = 0
@@ -228,6 +257,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.log.Info("proxied request",
 		"request_id", requestID,
 		"key", key.Prefix,
+		"endpoint", canonical,
+		"method", r.Method,
+		"body_bytes", len(body),
 		"model", model,
 		"family", family,
 		"status", upstream.StatusCode,

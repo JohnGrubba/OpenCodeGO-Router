@@ -147,9 +147,13 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 	}
 	s.tracker.EnsureWindow(window)
 	s.log.Info("api key created", "key_id", key.ID, "name", key.Name, "limits", len(limits), "models", len(allowed))
+	cfg, cfgText, _ := s.buildClientConfig(s.publicBase(r), &key, secret)
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"key":    s.keyView(r.Context(), key, now, store.KeyUsage{}),
-		"secret": secret,
+		"key":                    s.keyView(r.Context(), key, now, store.KeyUsage{}),
+		"secret":                 secret,
+		"client_config":          cfg,
+		"client_config_text":     cfgText,
+		"client_config_filename": "opencode.jsonc",
 	})
 }
 
@@ -283,7 +287,14 @@ func (s *Server) rotateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("api key rotated", "key_id", id, "name", k.Name)
-	writeJSON(w, http.StatusOK, map[string]any{"secret": secret, "prefix": prefix})
+	cfg, cfgText, _ := s.buildClientConfig(s.publicBase(r), &k, secret)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"secret":                 secret,
+		"prefix":                 prefix,
+		"client_config":          cfg,
+		"client_config_text":     cfgText,
+		"client_config_filename": "opencode.jsonc",
+	})
 }
 
 func (s *Server) setKeyEnabled(w http.ResponseWriter, r *http.Request) {
@@ -494,9 +505,13 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {
 	fetched, lastErr := s.models.Status()
 	plan := s.plan(r.Context())
 	out := s.models.List()
+	var fetchedAt int64
+	if !fetched.IsZero() {
+		fetchedAt = fetched.Unix()
+	}
 	resp := map[string]any{
 		"models":     out,
-		"fetched_at": fetched.Unix(),
+		"fetched_at": fetchedAt,
 		"plan":       plan,
 	}
 	if lastErr != nil {
@@ -578,6 +593,10 @@ func (s *Server) planUsage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	fetched, lastErr := s.models.Status()
+	var fetchedAt int64
+	if !fetched.IsZero() {
+		fetchedAt = fetched.Unix()
+	}
 	resp := map[string]any{
 		"name":              s.instanceName(r.Context()),
 		"plan":              s.plan(r.Context()),
@@ -589,7 +608,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		"upstream": map[string]any{
 			"configured": s.cfg.APIKey != "",
 			"base_url":   s.cfg.UpstreamBaseURL,
-			"fetched_at": fetched.Unix(),
+			"fetched_at": fetchedAt,
 		},
 	}
 	if lastErr != nil {
@@ -653,7 +672,7 @@ func (s *Server) exportCSV(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="opencode-go-router-usage.csv"`)
 	cw := csv.NewWriter(w)
-	_ = cw.Write([]string{"timestamp", "key_id", "key_name", "model", "endpoint", "status", "stream", "input_tokens", "output_tokens", "reasoning_tokens", "cache_read_tokens", "cache_write_tokens", "allowance_usd", "list_cost_usd", "estimated", "duration_ms", "session_id", "ip", "error"})
+	_ = cw.Write([]string{"timestamp", "key_id", "key_name", "model", "endpoint", "status", "stream", "input_tokens", "output_tokens", "reasoning_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd", "allowance_usd", "list_cost_usd", "estimated", "duration_ms", "session_id", "ip", "error"})
 	for _, row := range rows {
 		_ = cw.Write([]string{
 			time.Unix(row.CreatedAt, 0).UTC().Format(time.RFC3339),
@@ -661,6 +680,7 @@ func (s *Server) exportCSV(w http.ResponseWriter, r *http.Request) {
 			strconv.Itoa(row.Status), strconv.FormatBool(row.Stream),
 			strconv.FormatInt(row.Input, 10), strconv.FormatInt(row.Output, 10), strconv.FormatInt(row.Reasoning, 10),
 			strconv.FormatInt(row.CacheRead, 10), strconv.FormatInt(row.CacheWrite, 10),
+			strconv.FormatFloat(row.Cost, 'f', 6, 64),
 			strconv.FormatFloat(row.Allowance, 'f', 6, 64), strconv.FormatFloat(row.ListCost, 'f', 6, 64),
 			strconv.FormatBool(row.Estimated), strconv.FormatInt(row.DurationMS, 10),
 			csvSafe(row.SessionID), csvSafe(row.IP), csvSafe(row.Error),
@@ -709,6 +729,30 @@ func (s *Server) setupConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		filter = &k
 	}
+	cfg, text, ids := s.buildClientConfig(base, filter, "")
+	resp := map[string]any{
+		"public_url":       base,
+		"ready":            false,
+		"note":             "This is a template. Create or rotate a key to download a finished opencode.jsonc with the key embedded.",
+		"opencode_json":    cfg,
+		"opencode_jsonc":   text,
+		"model_count":      len(ids),
+		"install_command":  "curl -fsSL https://opencode.ai/v2/install | bash",
+		"example_command":  "opencode run --model go/kimi-k3 \"hello\"",
+		"config_path_hint": "~/.config/opencode/opencode.jsonc",
+	}
+	if filter != nil {
+		resp["key_id"] = filter.ID
+		resp["key_name"] = filter.Name
+		resp["key_prefix"] = filter.Prefix
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// buildClientConfig creates a ready-to-use opencode v2 config. When apiKey is
+// provided the key is embedded in provider settings, so no environment
+// variables are needed on the friend's machine.
+func (s *Server) buildClientConfig(base string, filter *store.Key, apiKey string) (map[string]any, string, []string) {
 	modelsCfg := map[string]any{}
 	modelIDs := []string{}
 	available := make([]catalog.Model, 0, len(s.models.List()))
@@ -735,18 +779,30 @@ func (s *Server) setupConfig(w http.ResponseWriter, r *http.Request) {
 		modelsCfg[m.ID] = entry
 		modelIDs = append(modelIDs, m.ID)
 	}
+
+	settings := map[string]any{"baseURL": base + "/go/openai/v1"}
+	provider := map[string]any{
+		"name":      "OpenCode Go (Router)",
+		"canonical": "opencode-go",
+		"package":   "@opencode/ai/providers/openai-compatible",
+		"settings":  settings,
+		"models":    modelsCfg,
+	}
+	if apiKey != "" {
+		// Belt and suspenders: newer OpenCode builds read settings.apiKey,
+		// while provider headers work across client versions and API families.
+		settings["apiKey"] = apiKey
+		provider["headers"] = map[string]string{
+			"Authorization":  "Bearer " + apiKey,
+			"X-Api-Key":      apiKey,
+			"X-Goog-Api-Key": apiKey,
+		}
+	} else {
+		settings["apiKey"] = "ocgr_REPLACE_ME"
+	}
 	cfg := map[string]any{
-		"$schema": "https://opencode.ai/config.json",
-		"providers": map[string]any{
-			"go": map[string]any{
-				"name":      "OpenCode Go (Router)",
-				"env":       []string{"OPENCODE_GO_KEY"},
-				"canonical": "opencode-go",
-				"package":   "@opencode/ai/providers/openai-compatible",
-				"settings":  map[string]any{"baseURL": base + "/go/openai/v1"},
-				"models":    modelsCfg,
-			},
-		},
+		"$schema":   "https://opencode.ai/config.json",
+		"providers": map[string]any{"go": provider},
 	}
 	// OpenCode uses a small model for titles and other auxiliary work. If it
 	// picks a model that is outside the key's allow-list those requests fail,
@@ -755,14 +811,5 @@ func (s *Server) setupConfig(w http.ResponseWriter, r *http.Request) {
 		cfg["small_model"] = "go/" + small
 	}
 	pretty, _ := json.MarshalIndent(cfg, "", "  ")
-	writeJSON(w, http.StatusOK, map[string]any{
-		"public_url":       base,
-		"env_var":          "OPENCODE_GO_KEY",
-		"opencode_json":    cfg,
-		"opencode_jsonc":   string(pretty),
-		"model_count":      len(modelIDs),
-		"install_command":  "curl -fsSL https://opencode.ai/v2/install | bash",
-		"example_command":  "OPENCODE_GO_KEY=\"ocgr_...\" opencode run --model go/kimi-k3 \"hello\"",
-		"config_path_hint": "~/.config/opencode/opencode.jsonc",
-	})
+	return cfg, string(pretty), modelIDs
 }

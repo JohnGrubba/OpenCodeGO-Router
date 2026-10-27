@@ -60,7 +60,16 @@
     },
     "deprecated": false,
     "go_monthly": 15,
-    "go_plus_monthly": 60
+    "go_plus_monthly": 60,
+    "peak": {
+      "multiplier": 2,
+      "windows": [
+        "01:00-04:00",
+        "06:00-10:00"
+      ],
+      "days": "Mon-Fri",
+      "timezone": "UTC"
+    }
   },
   {
     "id": "deepseek-v4.1-flash",
@@ -81,7 +90,16 @@
     },
     "deprecated": false,
     "go_monthly": 80,
-    "go_plus_monthly": 160
+    "go_plus_monthly": 160,
+    "peak": {
+      "multiplier": 2,
+      "windows": [
+        "01:00-04:00",
+        "06:00-10:00"
+      ],
+      "days": "Mon-Fri",
+      "timezone": "UTC"
+    }
   },
   {
     "id": "gemini-4-argon",

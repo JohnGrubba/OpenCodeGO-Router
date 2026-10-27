@@ -28,6 +28,21 @@ GO = {
     "gpt-6-luna": 15, "gpt-5.6-luna": 15, "claude-haiku-5-5": 15,
     "gemini-4-argon": 30,
 }
+PEAK = {
+    "deepseek-v4.1-flash": {
+        "multiplier": 2,
+        "windows": ["01:00-04:00", "06:00-10:00"],
+        "days": "Mon-Fri",
+        "timezone": "UTC",
+    },
+    "deepseek-v4-pro": {
+        "multiplier": 2,
+        "windows": ["01:00-04:00", "06:00-10:00"],
+        "days": "Mon-Fri",
+        "timezone": "UTC",
+    },
+}
+
 GO_PLUS = {
     "glm-5.3-flash": 180, "glm-5.3": 120, "glm-5.2": 180,
     "kimi-k3.1-pro": 60, "kimi-k3": 60, "kimi-k2.7-code": 180,
@@ -55,7 +70,7 @@ def main():
         package, api = PKG.get(npm, PKG["@ai-sdk/openai-compatible"])
         cost = m.get("cost", {}) or {}
         limit = m.get("limit", {}) or {}
-        out.append({
+        entry = {
             "id": mid,
             "name": m.get("name", mid),
             "family": m.get("family", ""),
@@ -75,7 +90,10 @@ def main():
             "deprecated": m.get("status") == "deprecated",
             "go_monthly": GO.get(mid),
             "go_plus_monthly": GO_PLUS.get(mid),
-        })
+        }
+        if mid in PEAK:
+            entry["peak"] = PEAK[mid]
+        out.append(entry)
     out.sort(key=lambda x: (x["deprecated"], x["name"].lower()))
     dest = Path(__file__).resolve().parent.parent / "internal/catalog/catalog.json"
     dest.write_text(json.dumps(out, indent=2) + "\n")

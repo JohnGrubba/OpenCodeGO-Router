@@ -526,3 +526,5 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   #keys-table td:last-child [data-key-action="delete"] { display: none; }
   #keys-table th, #keys-table td { padding-left: 8px; padding-right: 8px; }
 }
+
+.code-block.has-actions pre { padding-right: 190px; }

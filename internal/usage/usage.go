@@ -8,6 +8,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jonas/opencode-go-router/internal/catalog"
 )
@@ -264,25 +265,45 @@ func (u *Usage) Normalize(family string) {
 // Finalize normalizes the usage and resolves the dollar amount that should be
 // counted against a sub-key's limits.
 func (u *Usage) Finalize(family string, model catalog.Model) {
+	u.FinalizeAt(family, model, time.Now())
+}
+
+// FinalizeAt is Finalize with an explicit timestamp, used for deterministic
+// peak-hour estimates.
+func (u *Usage) FinalizeAt(family string, model catalog.Model, at time.Time) {
 	u.Normalize(family)
 	switch {
 	case u.Allowance > 0:
+		// Go reports the exact amount counted against the plan. This already
+		// includes DeepSeek peak pricing, long-context tiers and any discount.
 		u.Cost = u.Allowance
 	case u.Cost > 0:
 		// Actual charge reported by the gateway (balance/BYOK).
 	case u.ListCost > 0:
+		// Upstream list cost includes peak/tier pricing.
 		u.Cost = u.ListCost
 		u.Estimated = true
-	case u.BillingSource == "free" || u.BillingSource == "go" || u.BillingSource == "go-plus":
+	case u.BillingSource == "free":
 		u.Cost = 0
+	case u.BillingSource == "go" || u.BillingSource == "go-plus":
+		// The allowance should be present for Go. If it is missing, estimate
+		// rather than silently recording zero.
+		u.Cost = EstimateAt(model, *u, at)
+		u.Estimated = u.Cost > 0
 	default:
-		u.Cost = Estimate(model, *u)
+		u.Cost = EstimateAt(model, *u, at)
 		u.Estimated = u.Cost > 0
 	}
 }
 
-// Estimate computes a list-price estimate in USD.
+// Estimate computes a list-price estimate in USD at the current time.
 func Estimate(m catalog.Model, u Usage) float64 {
+	return EstimateAt(m, u, time.Now())
+}
+
+// EstimateAt computes a list-price estimate, applying the published DeepSeek
+// peak multiplier when applicable.
+func EstimateAt(m catalog.Model, u Usage, at time.Time) float64 {
 	total := float64(u.Input)*m.Cost.Input +
 		float64(u.Output)*m.Cost.Output +
 		float64(u.CacheRead)*m.Cost.CacheRead +
@@ -290,7 +311,7 @@ func Estimate(m catalog.Model, u Usage) float64 {
 	if total <= 0 {
 		return 0
 	}
-	return total / 1_000_000
+	return total * PeakMultiplier(m.ID, at) / 1_000_000
 }
 
 // ErrorMessage extracts a human-readable error from an upstream JSON body.

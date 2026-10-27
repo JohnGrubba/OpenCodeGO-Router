@@ -144,12 +144,28 @@ func TestLoginFlowAndSecurity(t *testing.T) {
 		t.Fatalf("create = %d %s", resp.StatusCode, b)
 	}
 	var created struct {
-		Secret string  `json:"secret"`
-		Key    keyView `json:"key"`
+		Secret       string         `json:"secret"`
+		Key          keyView        `json:"key"`
+		ClientConfig map[string]any `json:"client_config"`
+		ConfigText   string         `json:"client_config_text"`
 	}
 	decode(t, resp, &created)
 	if !strings.HasPrefix(created.Secret, auth.KeyPrefix) || created.Key.Name != "Friend" {
 		t.Fatalf("bad create response: %+v", created)
+	}
+	provider := created.ClientConfig["providers"].(map[string]any)["go"].(map[string]any)
+	if _, ok := provider["env"]; ok {
+		t.Fatalf("config should not rely on env: %+v", provider)
+	}
+	if provider["settings"].(map[string]any)["apiKey"] != created.Secret {
+		t.Fatalf("api key not embedded in config")
+	}
+	headers := provider["headers"].(map[string]any)
+	if headers["Authorization"] != "Bearer "+created.Secret || headers["X-Api-Key"] != created.Secret || headers["X-Goog-Api-Key"] != created.Secret {
+		t.Fatalf("auth headers not embedded in config: %+v", headers)
+	}
+	if !strings.Contains(created.ConfigText, created.Secret) {
+		t.Fatalf("config text does not contain the key")
 	}
 	if len(created.Key.Limits) != 1 || created.Key.Limits[0].Max != 2 {
 		t.Fatalf("limits not saved: %+v", created.Key.Limits)
@@ -161,6 +177,18 @@ func TestLoginFlowAndSecurity(t *testing.T) {
 	resp.Body.Close()
 	if strings.Contains(string(b), created.Secret) || strings.Contains(string(b), auth.HashSecret(created.Secret)) {
 		t.Fatalf("secret leaked in list response")
+	}
+
+	// Rotation returns a new secret and a fresh finished config.
+	resp = req(t, c, http.MethodPost, ts.URL+"/api/keys/"+created.Key.ID+"/rotate", "", true)
+	var rotated struct {
+		Secret       string         `json:"secret"`
+		ClientConfig map[string]any `json:"client_config"`
+	}
+	decode(t, resp, &rotated)
+	rp := rotated.ClientConfig["providers"].(map[string]any)["go"].(map[string]any)
+	if rp["settings"].(map[string]any)["apiKey"] != rotated.Secret {
+		t.Fatalf("rotated config does not contain the new key")
 	}
 
 	// Security headers.
@@ -265,4 +293,36 @@ func TestPerKeySetupAndModelList(t *testing.T) {
 		t.Fatalf("empty allow-list status = %d", resp.StatusCode)
 	}
 	resp.Body.Close()
+}
+
+func TestModelsExposePeakMetadata(t *testing.T) {
+	ts, _ := newTestServer(t)
+	c := client(t)
+	resp := req(t, c, http.MethodPost, ts.URL+"/api/login", `{"password":"test-password-123"}`, true)
+	resp.Body.Close()
+	resp = req(t, c, http.MethodGet, ts.URL+"/api/models", "", false)
+	var payload struct {
+		Models []struct {
+			ID   string `json:"id"`
+			Peak *struct {
+				Multiplier float64  `json:"multiplier"`
+				Windows    []string `json:"windows"`
+				Days       string   `json:"days"`
+				Timezone   string   `json:"timezone"`
+			} `json:"peak"`
+		} `json:"models"`
+	}
+	decode(t, resp, &payload)
+	found := false
+	for _, m := range payload.Models {
+		if m.ID == "deepseek-v4.1-flash" {
+			found = true
+			if m.Peak == nil || m.Peak.Multiplier != 2 || len(m.Peak.Windows) != 2 {
+				t.Fatalf("bad peak metadata: %+v", m.Peak)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("deepseek model missing from catalog response")
+	}
 }

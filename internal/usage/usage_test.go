@@ -1,7 +1,9 @@
 package usage
 
 import (
+	"math"
 	"testing"
+	"time"
 
 	"github.com/jonas/opencode-go-router/internal/catalog"
 )
@@ -92,5 +94,61 @@ func TestExtractErrorMessage(t *testing.T) {
 	raw := []byte(`{"error":{"message":"model is not allowed","type":"invalid_request_error"}}`)
 	if got := ErrorMessage(raw); got != "model is not allowed" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestDeepSeekPeakWindows(t *testing.T) {
+	cases := []struct {
+		name string
+		at   time.Time
+		peak bool
+	}{
+		{"monday 00:59", time.Date(2026, 10, 26, 0, 59, 0, 0, time.UTC), false},
+		{"monday 01:00", time.Date(2026, 10, 26, 1, 0, 0, 0, time.UTC), true},
+		{"monday 03:59", time.Date(2026, 10, 26, 3, 59, 0, 0, time.UTC), true},
+		{"monday 04:00", time.Date(2026, 10, 26, 4, 0, 0, 0, time.UTC), false},
+		{"monday 06:00", time.Date(2026, 10, 26, 6, 0, 0, 0, time.UTC), true},
+		{"monday 09:59", time.Date(2026, 10, 26, 9, 59, 0, 0, time.UTC), true},
+		{"monday 10:00", time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC), false},
+		{"saturday 02:00", time.Date(2026, 10, 31, 2, 0, 0, 0, time.UTC), false},
+		{"sunday 07:00", time.Date(2026, 11, 1, 7, 0, 0, 0, time.UTC), false},
+	}
+	for _, tc := range cases {
+		if got := IsDeepSeekPeak(tc.at); got != tc.peak {
+			t.Errorf("%s: IsDeepSeekPeak = %v, want %v", tc.name, got, tc.peak)
+		}
+	}
+}
+
+func TestDeepSeekPeakEstimate(t *testing.T) {
+	m, ok := catalog.Get("deepseek-v4.1-flash")
+	if !ok {
+		t.Fatal("missing deepseek model")
+	}
+	u := Usage{Input: 1_000_000}
+	offPeak := time.Date(2026, 10, 26, 5, 0, 0, 0, time.UTC)
+	peak := time.Date(2026, 10, 26, 2, 0, 0, 0, time.UTC)
+	if got := EstimateAt(m, u, offPeak); math.Abs(got-0.15) > 1e-12 {
+		t.Fatalf("off-peak estimate = %v, want 0.15", got)
+	}
+	if got := EstimateAt(m, u, peak); math.Abs(got-0.30) > 1e-12 {
+		t.Fatalf("peak estimate = %v, want 0.30", got)
+	}
+	// If Go omits allowance, the fallback must still use peak pricing.
+	missingAllowance := Usage{promptRaw: 1_000_000, BillingSource: "go"}
+	missingAllowance.FinalizeAt("chat", m, peak)
+	if math.Abs(missingAllowance.Cost-0.30) > 1e-12 || !missingAllowance.Estimated {
+		t.Fatalf("fallback peak cost = %+v", missingAllowance)
+	}
+	// The authoritative allowance is never multiplied again locally.
+	authoritative := Usage{Allowance: 0.30, promptRaw: 1_000_000, BillingSource: "go"}
+	authoritative.FinalizeAt("chat", m, peak)
+	if math.Abs(authoritative.Cost-0.30) > 1e-12 || authoritative.Estimated {
+		t.Fatalf("authoritative cost = %+v", authoritative)
+	}
+	// Other models have no peak multiplier.
+	kimiModel, _ := catalog.Get("kimi-k3")
+	if got := PeakMultiplier(kimiModel.ID, peak); got != 1 {
+		t.Fatalf("kimi multiplier = %v", got)
 	}
 }
