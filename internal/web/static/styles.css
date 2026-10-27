@@ -185,6 +185,17 @@ svg { display: block; }
 .stat-card.violet { background: linear-gradient(160deg, rgba(179, 156, 255, .10), rgba(14, 17, 24, .9) 55%); border-color: rgba(179, 156, 255, .2); }
 .stat-card.violet .stat-value { color: var(--violet); }
 
+/* ---------- maintenance ---------- */
+.maintenance-list { display: flex; flex-direction: column; gap: 10px; }
+.maintenance-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--panel-2); flex-wrap: wrap;
+}
+.maintenance-row > div { min-width: 0; flex: 1 1 320px; }
+.maintenance-row .cell-main { font-size: 12.5px; }
+.maintenance-row .btn { flex: 0 0 auto; }
+
 /* ---------- chart ---------- */
 .chart-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 8px; }
 .chart-legend { display: flex; align-items: center; gap: 14px; color: var(--faint); font-size: 11px; }

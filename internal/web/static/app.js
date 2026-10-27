@@ -677,6 +677,35 @@
     } catch (ex) { toast(ex.message, 'error'); }
   }
 
+  async function clearRequestHistory() {
+    const ok = await confirmModal(
+      'Clear request history?',
+      'This permanently deletes every logged request and resets all usage totals, charts and rolling key limits. Keys, their limits and model access stay configured. This cannot be undone.',
+      'Clear history'
+    );
+    if (!ok) return;
+    try {
+      const res = await api('/requests', { method: 'DELETE' });
+      const n = Number(res.deleted) || 0;
+      state.activity = { key: '', model: '', status: '', rows: [], next: 0, loaded: false };
+      toast(`Cleared ${fmtNum(n)} request${n === 1 ? '' : 's'}`, 'ok');
+      route();
+    } catch (ex) { toast(ex.message, 'error'); }
+  }
+
+  async function clearExpiredSessions(btn) {
+    btn.disabled = true;
+    try {
+      const res = await api('/sessions/expired', { method: 'DELETE' });
+      const n = Number(res.deleted) || 0;
+      toast(`Cleared ${fmtNum(n)} expired session${n === 1 ? '' : 's'}`, 'ok');
+    } catch (ex) {
+      toast(ex.message, 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   // ---------- key create / edit ----------
   async function openKeyModal(key) {
     let models;
@@ -1049,7 +1078,7 @@
     const keyOptions = (keys.keys || []).map((k) => `<option value="${esc(k.id)}" ${a.key === k.id ? 'selected' : ''}>${esc(k.name)}</option>`).join('');
     const modelOptions = models.filter((m) => !m.deprecated).map((m) => `<option value="${esc(m.id)}" ${a.model === m.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('');
 
-    $('#topbar-actions').innerHTML = `<a class="btn" href="/api/export.csv?range=30d" data-export>${icon('download')} Export CSV</a><button class="btn icon" data-refresh title="Refresh">${icon('refresh')}</button>`;
+    $('#topbar-actions').innerHTML = `<a class="btn" href="/api/export.csv?range=30d" data-export>${icon('download')} Export CSV</a><button class="btn danger" data-clear-history>${icon('trash')} Clear history</button><button class="btn icon" data-refresh title="Refresh">${icon('refresh')}</button>`;
     $('#view').innerHTML = `<div class="stack">
       <div class="card">
         <div class="filter-row">
@@ -1099,6 +1128,7 @@
       window.location.href = '/api/export.csv?range=' + encodeURIComponent(state.range);
     });
     $('#activity-more').addEventListener('click', () => loadActivity().catch((ex) => toast(ex.message, 'error')));
+    $$('[data-clear-history]').forEach((btn) => btn.addEventListener('click', clearRequestHistory));
     if (!a.loaded) { a.rows = []; a.next = 0; await loadActivity(); } else renderActivityRows();
   }
 
@@ -1314,6 +1344,26 @@
         </div>
       </div>
 
+      <div class="card">
+        <div class="card-head"><div><div class="card-title">Data &amp; maintenance</div><div class="card-sub">Clear stored data and tidy up the database</div></div></div>
+        <div class="maintenance-list">
+          <div class="maintenance-row">
+            <div>
+              <div class="cell-main">Request history &amp; usage</div>
+              <div class="tiny faint">Deletes every logged request and resets usage totals, charts and rolling key limits. Keys and settings stay configured.</div>
+            </div>
+            <button class="btn danger" data-clear-history>${icon('trash')} Clear history</button>
+          </div>
+          <div class="maintenance-row">
+            <div>
+              <div class="cell-main">Expired sessions</div>
+              <div class="tiny faint">Removes admin sessions that have already expired. Your current session is never touched.</div>
+            </div>
+            <button class="btn" data-clear-sessions>${icon('trash')} Clear expired sessions</button>
+          </div>
+        </div>
+      </div>
+
       <div class="grid cols-2">
         <div class="card">
           <div class="card-head"><div><div class="card-title">Export activity</div><div class="card-sub">CSV for spreadsheets or accounting</div></div></div>
@@ -1362,6 +1412,9 @@
     });
     $('[data-refresh]')?.addEventListener('click', route);
     $('[data-settings-create]')?.addEventListener('click', () => openKeyModal(null));
+    $$('[data-clear-history]').forEach((btn) => btn.addEventListener('click', clearRequestHistory));
+    const clearSessionsBtn = $('[data-clear-sessions]');
+    if (clearSessionsBtn) clearSessionsBtn.addEventListener('click', () => clearExpiredSessions(clearSessionsBtn));
   }
 
   // ---------- modal ----------

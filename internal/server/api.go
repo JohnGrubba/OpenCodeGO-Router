@@ -501,6 +501,31 @@ func (s *Server) listRequests(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"requests": rows, "next_before": next, "server_time": time.Now().Unix()})
 }
 
+// clearRequests deletes every logged request and resets the in-memory rolling
+// tracker so usage-based limits start from zero again.
+func (s *Server) clearRequests(w http.ResponseWriter, r *http.Request) {
+	deleted, err := s.store.ClearRequests(r.Context())
+	if err != nil {
+		s.log.Error("clear request history failed", "error", err)
+		writeErr(w, http.StatusInternalServerError, "Could not clear request history.")
+		return
+	}
+	s.tracker.Clear()
+	s.log.Info("request history cleared", "deleted", deleted, "ip", proxy.ClientIP(r, s.cfg.TrustProxy))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": deleted})
+}
+
+func (s *Server) clearExpiredSessions(w http.ResponseWriter, r *http.Request) {
+	deleted, err := s.store.ClearExpiredSessions(r.Context(), time.Now().Unix())
+	if err != nil {
+		s.log.Error("clear expired sessions failed", "error", err)
+		writeErr(w, http.StatusInternalServerError, "Could not clear expired sessions.")
+		return
+	}
+	s.log.Info("expired sessions cleared", "deleted", deleted, "ip", proxy.ClientIP(r, s.cfg.TrustProxy))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": deleted})
+}
+
 func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {
 	fetched, lastErr := s.models.Status()
 	plan := s.plan(r.Context())

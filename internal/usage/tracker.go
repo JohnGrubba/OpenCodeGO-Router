@@ -102,6 +102,15 @@ func (t *Tracker) Prune(now int64) {
 	}
 }
 
+// Clear drops every buffered event. It is used when the request history that
+// feeds the tracker is deleted.
+func (t *Tracker) Clear() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.keys = make(map[string]*keyEvents)
+	t.total = 0
+}
+
 // LimitStatus is the live state of one configured limit.
 type LimitStatus struct {
 	ID            int64   `json:"id"`

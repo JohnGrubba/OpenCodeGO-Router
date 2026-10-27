@@ -146,7 +146,7 @@ tokens 2,000,000 / 7d
 - **DeepSeek peak pricing is respected.** Go's `allowance` and `list_cost` already include peak pricing. The router's local fallback estimate applies the published 2× multiplier for DeepSeek V4.1 Flash / V4 Pro during **01:00–04:00 and 06:00–10:00 UTC, Monday–Friday**; all other hours and weekends are off-peak. The Models page also documents these windows.
 - Limits are soft at the moment of overshoot: a request already in flight can push usage past the cap; the next request is blocked.
 - Revoking, disabling, editing limits or model access takes effect on the next request. Sub-key secrets are never cached.
-- Usage history is retained for `RETENTION_DAYS` (default 180).
+- Usage history is retained for `RETENTION_DAYS` (default 180). You can delete all request history and reset rolling usage from **Activity → Clear history** or **Settings → Data & maintenance**; keys and their configuration stay in place.
 
 ## Security
 

@@ -134,6 +134,56 @@ func TestSessions(t *testing.T) {
 	}
 }
 
+func TestClearRequestsAndExpiredSessions(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	now := time.Now().Unix()
+
+	for i := 0; i < 3; i++ {
+		if err := st.InsertRequest(ctx, Request{
+			KeyID: "k1", KeyName: "Friend", Model: "kimi-k3", Status: 200,
+			Cost: 0.1, Input: 10, Output: 5, CreatedAt: now - int64(i),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.CreateSession(ctx, Session{Hash: "expired", CreatedAt: now - 100, ExpiresAt: now - 1, LastSeen: now - 100}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateSession(ctx, Session{Hash: "live", CreatedAt: now, ExpiresAt: now + 60, LastSeen: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	deletedSessions, err := st.ClearExpiredSessions(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deletedSessions != 1 {
+		t.Fatalf("expired sessions deleted = %d, want 1", deletedSessions)
+	}
+	if _, err := st.GetSession(ctx, "live", now); err != nil {
+		t.Fatalf("live session was removed: %v", err)
+	}
+
+	deleted, err := st.ClearRequests(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 3 {
+		t.Fatalf("requests deleted = %d, want 3", deleted)
+	}
+	rows, err := st.Requests(ctx, RequestFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("requests remain after clear: %+v", rows)
+	}
+	if usage, err := st.KeyUsageAll(ctx, now); err != nil || usage["k1"].D30.Requests != 0 {
+		t.Fatalf("usage not reset: %+v %v", usage["k1"], err)
+	}
+}
+
 func almost(a, b float64) bool {
 	d := a - b
 	return d < 1e-9 && d > -1e-9

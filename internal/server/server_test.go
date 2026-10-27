@@ -295,6 +295,73 @@ func TestPerKeySetupAndModelList(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestClearRequestHistoryAndExpiredSessions(t *testing.T) {
+	ts, st := newTestServer(t)
+	c := client(t)
+	resp := req(t, c, http.MethodPost, ts.URL+"/api/login", `{"password":"test-password-123"}`, true)
+	resp.Body.Close()
+
+	ctx := context.Background()
+	now := time.Now().Unix()
+	for i := 0; i < 2; i++ {
+		if err := st.InsertRequest(ctx, store.Request{
+			KeyID: "gone", KeyName: "Old key", Model: "kimi-k3", Status: 200,
+			Cost: 0.5, Input: 20, Output: 10, CreatedAt: now - int64(i),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.CreateSession(ctx, store.Session{
+		Hash: "expired-session", CreatedAt: now - 100, ExpiresAt: now - 1, LastSeen: now - 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp = req(t, c, http.MethodDelete, ts.URL+"/api/requests", "", true)
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("clear requests = %d %s", resp.StatusCode, b)
+	}
+	var cleared struct {
+		Deleted int64 `json:"deleted"`
+	}
+	decode(t, resp, &cleared)
+	if cleared.Deleted != 2 {
+		t.Fatalf("deleted = %d, want 2", cleared.Deleted)
+	}
+
+	resp = req(t, c, http.MethodGet, ts.URL+"/api/requests", "", false)
+	var activity struct {
+		Requests []store.Request `json:"requests"`
+	}
+	decode(t, resp, &activity)
+	if len(activity.Requests) != 0 {
+		t.Fatalf("requests remain after clear: %+v", activity.Requests)
+	}
+
+	resp = req(t, c, http.MethodDelete, ts.URL+"/api/sessions/expired", "", true)
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("clear sessions = %d %s", resp.StatusCode, b)
+	}
+	var sessions struct {
+		Deleted int64 `json:"deleted"`
+	}
+	decode(t, resp, &sessions)
+	if sessions.Deleted != 1 {
+		t.Fatalf("expired sessions deleted = %d, want 1", sessions.Deleted)
+	}
+
+	// Clearing expired sessions must not sign out the current admin.
+	resp = req(t, c, http.MethodGet, ts.URL+"/api/settings", "", false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("settings after session cleanup = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 func TestModelsExposePeakMetadata(t *testing.T) {
 	ts, _ := newTestServer(t)
 	c := client(t)

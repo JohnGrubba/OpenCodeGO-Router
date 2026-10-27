@@ -355,6 +355,18 @@ func (s *Store) DeleteOtherSessions(ctx context.Context, keepHash string) error 
 	return err
 }
 
+// ClearExpiredSessions deletes sessions whose expiry has already passed.
+func (s *Store) ClearExpiredSessions(ctx context.Context, now int64) (int64, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	res, err := s.db.ExecContext(ctx, "DELETE FROM sessions WHERE expires_at<?", now)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // ---- keys ----
 
 func scanAllowed(s string) []string {
@@ -570,6 +582,19 @@ func (s *Store) InsertRequest(ctx context.Context, r Request) error {
 		r.Status, boolInt(r.Stream), r.Input, r.Output, r.Reasoning, r.CacheRead, r.CacheWrite,
 		r.Cost, r.Allowance, r.ListCost, boolInt(r.Estimated), r.DurationMS, r.CreatedAt)
 	return err
+}
+
+// ClearRequests deletes all request history. Derived usage views become empty;
+// the caller is responsible for resetting any in-memory limit tracker.
+func (s *Store) ClearRequests(ctx context.Context) (int64, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	res, err := s.db.ExecContext(ctx, "DELETE FROM requests")
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 func (s *Store) KeyUsageAll(ctx context.Context, now int64) (map[string]KeyUsage, error) {

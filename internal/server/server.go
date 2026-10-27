@@ -93,6 +93,8 @@ func (s *Server) routes() {
 	admin.HandleFunc("POST /keys/{id}/rotate", s.rotateKey)
 	admin.HandleFunc("POST /keys/{id}/enabled", s.setKeyEnabled)
 	admin.HandleFunc("GET /requests", s.listRequests)
+	admin.HandleFunc("DELETE /requests", s.clearRequests)
+	admin.HandleFunc("DELETE /sessions/expired", s.clearExpiredSessions)
 	admin.HandleFunc("GET /models", s.listModels)
 	admin.HandleFunc("POST /models/refresh", s.refreshModels)
 	admin.HandleFunc("GET /plan", s.planUsage)

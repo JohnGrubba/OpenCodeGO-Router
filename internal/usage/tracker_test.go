@@ -44,3 +44,17 @@ func TestTrackerPrune(t *testing.T) {
 		t.Fatal("recent event should remain")
 	}
 }
+
+func TestTrackerClear(t *testing.T) {
+	now := time.Now().Unix()
+	tr := NewTracker(30 * 86400)
+	tr.Add("k1", now-10, 1, 100)
+	tr.Clear()
+	statuses, blocked := tr.Check("k1", []store.Limit{{Metric: "cost", WindowSeconds: 30 * 86400, Max: 0.5}}, now)
+	if blocked {
+		t.Fatal("cleared tracker should not block")
+	}
+	if len(statuses) != 1 || statuses[0].Used != 0 {
+		t.Fatalf("statuses after clear = %+v", statuses)
+	}
+}
