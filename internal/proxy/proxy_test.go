@@ -188,6 +188,32 @@ func TestProxyModelAllowlist(t *testing.T) {
 	}
 }
 
+func TestFormatMoneyKeepsSubCentPrecision(t *testing.T) {
+	cases := map[float64]string{
+		0:                    "0.00",
+		0.00014:              "0.00014",
+		0.0000014:            "0.0000014",
+		0.005:                "0.005",
+		0.1 + 0.2:            "0.30",
+		1:                    "1.00",
+		12.3456789012345678:  "12.345678901235",
+		123.4567890123456789: "123.456789012346",
+	}
+	for in, want := range cases {
+		if got := formatMoney(in); got != want {
+			t.Errorf("formatMoney(%v) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestFormatLimitPhraseKeepsSubCentPrecision(t *testing.T) {
+	got := formatLimitPhrase("cost", 0.00014, 0.005)
+	want := "$0.00014 of $0.005 spend"
+	if got != want {
+		t.Fatalf("formatLimitPhrase = %q, want %q", got, want)
+	}
+}
+
 func TestProxyCostLimit(t *testing.T) {
 	p, st, _ := testProxy(t)
 	secret := makeKey(t, st, []string{"*"}, []store.Limit{{Metric: "cost", WindowSeconds: 3600, Max: 0.005}})

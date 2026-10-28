@@ -273,16 +273,16 @@ func (u *Usage) Finalize(family string, model catalog.Model) {
 func (u *Usage) FinalizeAt(family string, model catalog.Model, at time.Time) {
 	u.Normalize(family)
 	switch {
+	case u.ListCost > 0:
+		// Go reports the list price, which is what the OpenCode console shows.
+		// It already includes DeepSeek peak pricing and long-context tiers.
+		u.Cost = u.ListCost
 	case u.Allowance > 0:
-		// Go reports the exact amount counted against the plan. This already
-		// includes DeepSeek peak pricing, long-context tiers and any discount.
+		// Fallback: the amount counted against the plan. This is a discounted
+		// figure, so it is only used when the upstream omits list_cost.
 		u.Cost = u.Allowance
 	case u.Cost > 0:
 		// Actual charge reported by the gateway (balance/BYOK).
-	case u.ListCost > 0:
-		// Upstream list cost includes peak/tier pricing.
-		u.Cost = u.ListCost
-		u.Estimated = true
 	case u.BillingSource == "free":
 		u.Cost = 0
 	case u.BillingSource == "go" || u.BillingSource == "go-plus":

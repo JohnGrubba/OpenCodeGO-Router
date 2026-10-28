@@ -705,8 +705,8 @@ func (s *Server) exportCSV(w http.ResponseWriter, r *http.Request) {
 			strconv.Itoa(row.Status), strconv.FormatBool(row.Stream),
 			strconv.FormatInt(row.Input, 10), strconv.FormatInt(row.Output, 10), strconv.FormatInt(row.Reasoning, 10),
 			strconv.FormatInt(row.CacheRead, 10), strconv.FormatInt(row.CacheWrite, 10),
-			strconv.FormatFloat(row.Cost, 'f', 6, 64),
-			strconv.FormatFloat(row.Allowance, 'f', 6, 64), strconv.FormatFloat(row.ListCost, 'f', 6, 64),
+			strconv.FormatFloat(row.Cost, 'f', -1, 64),
+			strconv.FormatFloat(row.Allowance, 'f', -1, 64), strconv.FormatFloat(row.ListCost, 'f', -1, 64),
 			strconv.FormatBool(row.Estimated), strconv.FormatInt(row.DurationMS, 10),
 			csvSafe(row.SessionID), csvSafe(row.IP), csvSafe(row.Error),
 		})

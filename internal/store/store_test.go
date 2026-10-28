@@ -17,6 +17,37 @@ func testStore(t *testing.T) *Store {
 	return st
 }
 
+func TestMigrateCostBasisBackfillsListCost(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	if err := st.InsertRequest(ctx, Request{
+		KeyID: "k1", KeyName: "Friend", Model: "deepseek-v4.1-flash", Status: 200,
+		Cost: 0.00010635, Allowance: 0.00010635, ListCost: 0.0001418,
+		CreatedAt: time.Now().Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a database opened before the cost-basis migration existed.
+	if _, err := st.db.ExecContext(ctx, `DELETE FROM settings WHERE key=?`, costBasisMigration); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.migrateCostBasis(); err != nil {
+		t.Fatal(err)
+	}
+	var cost float64
+	var estimated int
+	if err := st.db.QueryRowContext(ctx, `SELECT cost, estimated FROM requests WHERE key_id='k1'`).Scan(&cost, &estimated); err != nil {
+		t.Fatal(err)
+	}
+	if !almost(cost, 0.0001418) || estimated != 0 {
+		t.Fatalf("cost=%v estimated=%d, want list_cost 0.0001418 and not estimated", cost, estimated)
+	}
+	// Running it again must be a harmless no-op.
+	if err := st.migrateCostBasis(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestUsageAggregations(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()

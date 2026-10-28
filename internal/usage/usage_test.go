@@ -41,6 +41,26 @@ func TestExtractOpenAIChatWithAllowance(t *testing.T) {
 	}
 }
 
+func TestFinalizeUsesListCostForConsoleParity(t *testing.T) {
+	// Go reports a discounted allowance (75% of list cost). The OpenCode
+	// console shows the list price, so the router must record list_cost.
+	u := Usage{ListCost: 0.0001418, Allowance: 0.00010635, BillingSource: "go"}
+	u.FinalizeAt("chat", kimi(t), time.Now())
+	if math.Abs(u.Cost-0.0001418) > 1e-15 {
+		t.Fatalf("cost = %v, want list_cost 0.0001418", u.Cost)
+	}
+	if u.Estimated {
+		t.Fatal("upstream list_cost must not be marked as estimated")
+	}
+
+	// Without list_cost, fall back to the plan allowance.
+	fallback := Usage{Allowance: 0.00010635, BillingSource: "go"}
+	fallback.FinalizeAt("chat", kimi(t), time.Now())
+	if math.Abs(fallback.Cost-0.00010635) > 1e-15 {
+		t.Fatalf("fallback cost = %v, want allowance 0.00010635", fallback.Cost)
+	}
+}
+
 func TestExtractOpenAIWithoutOpenCodeTokens(t *testing.T) {
 	raw := []byte(`{"usage":{"prompt_tokens":100,"completion_tokens":25,"prompt_tokens_details":{"cached_tokens":40}}}`)
 	u := Extract(raw, "chat")

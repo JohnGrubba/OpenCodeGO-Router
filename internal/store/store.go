@@ -241,9 +241,45 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	s := &Store{db: db}
+	if err := s.migrateCostBasis(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate cost basis: %w", err)
+	}
 	// Best effort: tighten permissions on the database and WAL files.
 	_ = os.Chmod(path, 0o600)
-	return &Store{db: db}, nil
+	return s, nil
+}
+
+// costBasisMigration is a one-time backfill for databases written before the
+// router switched from Go's discounted allowance to the list price shown in
+// the OpenCode console. Older rows recorded allowance in cost, but already
+// stored list_cost alongside it, so the original value can be restored.
+const costBasisMigration = "migration_cost_basis_list_v1"
+
+func (s *Store) migrateCostBasis() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.Exec(`INSERT INTO settings(key,value) VALUES(?, '1') ON CONFLICT(key) DO NOTHING`, costBasisMigration)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil // already applied
+	}
+	if _, err := tx.Exec(`UPDATE requests SET cost = list_cost, estimated = 0
+		WHERE list_cost > 0 AND allowance > 0 AND cost <> list_cost`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) Close() error { return s.db.Close() }

@@ -23,18 +23,26 @@
   function esc(v) {
     return String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
+  // Money is stored as a float64. Upstream reports far more than four decimals
+  // (e.g. $0.00014), so never round it away: keep ~12 significant digits, which
+  // is comfortably above the precision Go reports, and trim trailing zeros.
+  // Twelve digits also hides binary floating-point noise from summed totals.
   function fmtMoney(v) {
     v = Number(v) || 0;
     if (v === 0) return '$0.00';
-    if (v < 0.01) return '$' + v.toFixed(4);
-    if (v < 1) return '$' + v.toFixed(3);
-    return '$' + v.toFixed(2);
+    const abs = Math.abs(v);
+    const decimals = Math.min(20, Math.max(2, 12 - Math.floor(Math.log10(abs)) - 1));
+    let s = v.toFixed(decimals);
+    if (s.includes('.')) s = s.replace(/0+$/, '').replace(/\.$/, '');
+    if (!s.includes('.')) s += '.00';
+    else {
+      const frac = s.split('.')[1];
+      if (frac.length < 2) s += '0'.repeat(2 - frac.length);
+    }
+    return '$' + s;
   }
   function fmtMoneyExact(v) {
-    v = Number(v) || 0;
-    if (v === 0) return '$0.00';
-    if (v < 1) return '$' + v.toFixed(4);
-    return '$' + v.toFixed(2);
+    return fmtMoney(v);
   }
   function fmtNum(v) {
     return new Intl.NumberFormat().format(Number(v) || 0);
@@ -422,14 +430,14 @@
         <div class="grid main-split">
           <div class="card">
             <div class="card-head">
-              <div><div class="card-title">Models</div><div class="card-sub">By allowance in this range</div></div>
+              <div><div class="card-title">Models</div><div class="card-sub">By spend in this range</div></div>
               <a class="card-link" href="#/models">Plan limits ${icon('external')}</a>
             </div>
             ${modelUsageList(data.models)}
           </div>
           <div class="card">
             <div class="card-head">
-              <div><div class="card-title">Top keys</div><div class="card-sub">Who used the allowance</div></div>
+              <div><div class="card-title">Top keys</div><div class="card-sub">Who spent the most</div></div>
               <a class="card-link" href="#/keys">All keys ${icon('external')}</a>
             </div>
             ${keyUsageList(data.keys)}
@@ -1208,7 +1216,7 @@
         <div class="tiny faint" style="margin-top:10px">These bars show your recent usage against the plan limits; they are not the limits you set on sub-keys. Summing monthly limits is only a rough overview because each model has its own bucket.</div>
       </div>
 
-      ${peakModels.length ? `<div class="callout warn">${icon('alert')}<div><strong>Peak pricing:</strong> ${peakModels.map((m) => `${esc(m.name)} ${m.peak.multiplier}× (${esc((m.peak.windows || []).join(' / '))} ${esc(m.peak.days)} ${esc(m.peak.timezone)})`).join('; ')}. Usage, limits and plan bars use the allowance reported by Go, so peak pricing is already included. The router's local fallback estimate applies the same multiplier.</div></div>` : ''}
+      ${peakModels.length ? `<div class="callout warn">${icon('alert')}<div><strong>Peak pricing:</strong> ${peakModels.map((m) => `${esc(m.name)} ${m.peak.multiplier}× (${esc((m.peak.windows || []).join(' / '))} ${esc(m.peak.days)} ${esc(m.peak.timezone)})`).join('; ')}. Usage, limits and plan bars use the list price reported by Go (the same value the OpenCode console shows), so peak pricing is already included. The router's local fallback estimate applies the same multiplier.</div></div>` : ''}
 
       <div class="card pad-0">
         <div class="row between wrap" style="padding:16px 18px;border-bottom:1px solid var(--border)">

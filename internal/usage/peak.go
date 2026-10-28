@@ -18,8 +18,8 @@ func IsDeepSeekPeak(at time.Time) bool {
 }
 
 // PeakMultiplier returns the price multiplier for a model at a point in time.
-// The upstream reports the authoritative allowance/list cost; this is used
-// only for local fallback estimates.
+// The upstream reports the authoritative list cost; this is used only for
+// local fallback estimates.
 func PeakMultiplier(modelID string, at time.Time) float64 {
 	switch modelID {
 	case "deepseek-v4.1-flash", "deepseek-v4-pro":

@@ -176,8 +176,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if hit != nil {
 			w.Header().Set("X-Go-Router-Limit-Metric", hit.Metric)
 			w.Header().Set("X-Go-Router-Limit-Window", strconv.FormatInt(hit.WindowSeconds, 10))
-			w.Header().Set("X-Go-Router-Limit-Max", strconv.FormatFloat(hit.Max, 'f', 4, 64))
-			w.Header().Set("X-Go-Router-Limit-Used", strconv.FormatFloat(hit.Used, 'f', 4, 64))
+			w.Header().Set("X-Go-Router-Limit-Max", strconv.FormatFloat(hit.Max, 'f', -1, 64))
+			w.Header().Set("X-Go-Router-Limit-Used", strconv.FormatFloat(hit.Used, 'f', -1, 64))
 		}
 		p.log.Info("request blocked by limit", "key", key.Prefix, "model", model, "limit", hit)
 		msg := "Usage limit exceeded for this API key."
@@ -798,8 +798,26 @@ func formatLimitPhrase(metric string, used, max float64) string {
 	case "tokens":
 		return fmt.Sprintf("%.0f of %.0f tokens", used, max)
 	default:
-		return fmt.Sprintf("$%.4f of $%.4f spend", used, max)
+		return fmt.Sprintf("$%s of $%s spend", formatMoney(used), formatMoney(max))
 	}
+}
+
+// formatMoney renders a USD amount without dropping the sub-cent precision
+// reported by Go (for example $0.00014). It keeps up to 12 decimal places,
+// which is well beyond upstream precision, trims trailing zeros, and always
+// leaves at least two decimal places.
+func formatMoney(v float64) string {
+	s := strconv.FormatFloat(v, 'f', 12, 64)
+	if strings.Contains(s, ".") {
+		s = strings.TrimRight(s, "0")
+		s = strings.TrimRight(s, ".")
+	}
+	if i := strings.IndexByte(s, '.'); i < 0 {
+		return s + ".00"
+	} else if frac := len(s) - i - 1; frac < 2 {
+		return s + strings.Repeat("0", 2-frac)
+	}
+	return s
 }
 
 func truncate(s string, n int) string {

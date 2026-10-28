@@ -14,7 +14,7 @@ A self-hosted gateway and dashboard for an **OpenCode Go** subscription. It lets
 ## Features
 
 - **Sub-keys in one click.** `ocgr_…` secrets are shown once and stored only as SHA-256 hashes. The generated client config has the key baked in, so friends do not have to set environment variables.
-- **Live usage accounting.** Every request records input/output/reasoning/cache tokens, latency, model, status and the exact `opencode.allowance` reported by Go.
+- **Live usage accounting.** Every request records input/output/reasoning/cache tokens, latency, model, status and the exact `opencode.list_cost` reported by Go (the same list price the OpenCode console shows). The discounted `allowance` is stored alongside it.
 - **Rolling limits.** Cap **spend (USD)**, **requests**, or **tokens** over any interval: 5 hours, 24 hours, 7 days, 30 days, or a custom window up to 90 days. Multiple limits per key are combined.
 - **Model allow-lists.** Grant all models, or a hand-picked subset. Enforced before the request reaches the upstream.
 - **Plan visibility.** Per-model 5h / 7d / 30d progress against your Go or Go Plus allowance, so you can see where the plan is going.
@@ -142,8 +142,8 @@ tokens 2,000,000 / 7d
 ```
 
 - A key is blocked if **any** limit is exhausted. The upstream returns a family-appropriate `429` with `Retry-After` and `X-Go-Router-Limit-*` headers.
-- Spend uses the `opencode.allowance` value from Go (the amount counted against your plan). If a response lacks it, the router falls back to `list_cost` and then to a catalog-price estimate (flagged as estimated).
-- **DeepSeek peak pricing is respected.** Go's `allowance` and `list_cost` already include peak pricing. The router's local fallback estimate applies the published 2× multiplier for DeepSeek V4.1 Flash / V4 Pro during **01:00–04:00 and 06:00–10:00 UTC, Monday–Friday**; all other hours and weekends are off-peak. The Models page also documents these windows.
+- Spend uses the `opencode.list_cost` value from Go, which is the list price shown in the OpenCode console. If a response lacks it, the router falls back to `opencode.allowance` (the discounted amount counted against your plan), then to a catalog-price estimate (flagged as estimated). Both values are stored per request and included in the CSV export.
+- **DeepSeek peak pricing is respected.** Go's `list_cost` and `allowance` already include peak pricing. The router's local fallback estimate applies the published 2× multiplier for DeepSeek V4.1 Flash / V4 Pro during **01:00–04:00 and 06:00–10:00 UTC, Monday–Friday**; all other hours and weekends are off-peak. The Models page also documents these windows.
 - Limits are soft at the moment of overshoot: a request already in flight can push usage past the cap; the next request is blocked.
 - Revoking, disabling, editing limits or model access takes effect on the next request. Sub-key secrets are never cached.
 - Usage history is retained for `RETENTION_DAYS` (default 180). You can delete all request history and reset rolling usage from **Activity → Clear history** or **Settings → Data & maintenance**; keys and their configuration stay in place.
