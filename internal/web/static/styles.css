@@ -127,7 +127,7 @@ svg { display: block; }
   pointer-events: none;
 }
 .login-card {
-  position: relative; width: min(410px, 100%);
+  position: relative; width: min(560px, 100%);
   background: linear-gradient(180deg, rgba(20, 24, 34, .96), rgba(13, 16, 23, .98));
   border: 1px solid var(--border); border-radius: 22px;
   padding: 34px 30px 24px; box-shadow: var(--shadow);
@@ -135,8 +135,34 @@ svg { display: block; }
 .login-card .brand-mark { margin-bottom: 20px; }
 .login-card h1 { font-size: 22px; letter-spacing: -.02em; }
 .login-sub { color: var(--muted); font-size: 13px; margin: 7px 0 24px; }
+.login-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 14px;
+}
+.login-divider {
+  display: flex; align-items: center; justify-content: center;
+  padding-bottom: 9px; color: var(--faint); font-size: 10px;
+  font-weight: 600; letter-spacing: .12em; text-transform: uppercase;
+}
 .login-foot { display: flex; align-items: center; gap: 7px; color: var(--faint); font-size: 11px; margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--border); }
 .login-foot .dot { background: var(--ok); }
+
+/* ---------- sub-key owner portal ---------- */
+.portal { min-height: 100vh; display: flex; flex-direction: column; }
+.portal-top {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 18px 38px; border-bottom: 1px solid var(--border);
+  background: rgba(8, 9, 12, .82); backdrop-filter: blur(18px);
+  flex-wrap: wrap;
+}
+.portal-top .brand { padding: 0; }
+.portal-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.portal-main { flex: 1; width: 100%; max-width: 1240px; margin: 0 auto; padding: 28px 38px 40px; }
+.portal-foot { width: 100%; max-width: 1240px; margin: 0 auto; }
 
 /* ---------- utility ---------- */
 .row { display: flex; align-items: center; gap: 10px; }
@@ -476,6 +502,8 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   .topbar { padding: 22px 20px 14px; }
   .view { padding: 4px 20px 32px; }
   .footer { padding: 16px 20px 22px; }
+  .portal-top { padding: 14px 20px; }
+  .portal-main { padding: 20px 20px 32px; }
   .grid.cols-2, .grid.cols-3, .grid.cols-4 { grid-template-columns: 1fr; }
 }
 @media (max-width: 640px) {
@@ -485,6 +513,8 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   .grid.stats { grid-template-columns: 1fr 1fr; }
   .stat-value { font-size: 23px; }
   .form-row, .form-row.three { grid-template-columns: 1fr; }
+  .login-fields { grid-template-columns: 1fr; }
+  .login-divider { padding: 0; }
   .modal-foot, .form-actions { flex-direction: column-reverse; }
   .modal-foot .btn, .form-actions .btn { width: 100%; }
   .card { padding: 16px; }

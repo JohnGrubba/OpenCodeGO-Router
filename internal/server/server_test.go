@@ -393,3 +393,192 @@ func TestModelsExposePeakMetadata(t *testing.T) {
 		t.Fatal("deepseek model missing from catalog response")
 	}
 }
+
+func TestAPIKeyLoginPortalAndIsolation(t *testing.T) {
+	ts, st := newTestServer(t)
+	admin := client(t)
+	resp := req(t, admin, http.MethodPost, ts.URL+"/api/login", `{"password":"test-password-123"}`, true)
+	resp.Body.Close()
+
+	resp = req(t, admin, http.MethodPost, ts.URL+"/api/keys", `{"name":"Friend","allowed_models":["kimi-k3"],"limits":[{"metric":"cost","window_seconds":86400,"max":2}]}`, true)
+	var created struct {
+		Secret string  `json:"secret"`
+		Key    keyView `json:"key"`
+	}
+	decode(t, resp, &created)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create key failed")
+	}
+	if err := st.InsertRequest(context.Background(), store.Request{
+		KeyID: created.Key.ID, KeyName: "Friend", Model: "kimi-k3", Status: 200,
+		Cost: 0.5, Input: 100, Output: 50, CreatedAt: time.Now().Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	keyClient := client(t)
+
+	// Malformed, unknown and mixed credentials are all rejected.
+	resp = req(t, keyClient, http.MethodPost, ts.URL+"/api/login", `{"api_key":"ocgr_not-a-real-key-1234567890"}`, true)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unknown key = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = req(t, keyClient, http.MethodPost, ts.URL+"/api/login", `{"password":"test-password-123","api_key":"`+created.Secret+`"}`, true)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("mixed credentials = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = req(t, keyClient, http.MethodPost, ts.URL+"/api/login", `{"api_key":"`+created.Secret+`"}`, true)
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("key login = %d %s", resp.StatusCode, b)
+	}
+	var login struct {
+		Role string `json:"role"`
+	}
+	decode(t, resp, &login)
+	if login.Role != "key" {
+		t.Fatalf("role = %q", login.Role)
+	}
+
+	resp = req(t, keyClient, http.MethodGet, ts.URL+"/api/session", "", false)
+	var sess struct {
+		Authenticated bool   `json:"authenticated"`
+		Role          string `json:"role"`
+	}
+	decode(t, resp, &sess)
+	if !sess.Authenticated || sess.Role != "key" {
+		t.Fatalf("session = %+v", sess)
+	}
+
+	resp = req(t, keyClient, http.MethodGet, ts.URL+"/api/me", "", false)
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("portal = %d %s", resp.StatusCode, b)
+	}
+	var me struct {
+		Key    keyView         `json:"key"`
+		Totals store.Totals    `json:"totals_30d"`
+		Recent []store.Request `json:"recent"`
+		Models []myModelView   `json:"models"`
+	}
+	decode(t, resp, &me)
+	if me.Key.ID != created.Key.ID || me.Key.Name != "Friend" {
+		t.Fatalf("portal key = %+v", me.Key)
+	}
+	if me.Totals.Requests != 1 || me.Totals.Cost != 0.5 {
+		t.Fatalf("portal totals = %+v", me.Totals)
+	}
+	if len(me.Recent) != 1 || me.Recent[0].KeyID != created.Key.ID {
+		t.Fatalf("portal recent = %+v", me.Recent)
+	}
+	if len(me.Models) != 1 || me.Models[0].ID != "kimi-k3" {
+		t.Fatalf("portal models = %+v", me.Models)
+	}
+
+	resp = req(t, keyClient, http.MethodGet, ts.URL+"/api/me/requests?limit=10", "", false)
+	var mine struct {
+		Requests []store.Request `json:"requests"`
+	}
+	decode(t, resp, &mine)
+	if resp.StatusCode != http.StatusOK || len(mine.Requests) != 1 {
+		t.Fatalf("portal requests = %d %+v", resp.StatusCode, mine.Requests)
+	}
+
+	resp = req(t, keyClient, http.MethodGet, ts.URL+"/api/me/export.csv?range=30d", "", false)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "Friend") || !strings.Contains(string(body), "kimi-k3") {
+		t.Fatalf("portal export = %d %s", resp.StatusCode, body)
+	}
+
+	// A key session must never unlock the admin API.
+	resp = req(t, keyClient, http.MethodGet, ts.URL+"/api/keys", "", false)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("key session reached admin API: %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = req(t, keyClient, http.MethodPost, ts.URL+"/api/keys", `{"name":"x"}`, true)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("key session mutated admin API: %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Logout is CSRF protected and invalidates the portal session.
+	resp = req(t, keyClient, http.MethodPost, ts.URL+"/api/logout", "", false)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("key logout without csrf = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = req(t, keyClient, http.MethodPost, ts.URL+"/api/logout", "", true)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("key logout = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = req(t, keyClient, http.MethodGet, ts.URL+"/api/me", "", false)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("portal after logout = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestKeySessionRevokedOnRotateAndDisable(t *testing.T) {
+	ts, _ := newTestServer(t)
+	admin := client(t)
+	resp := req(t, admin, http.MethodPost, ts.URL+"/api/login", `{"password":"test-password-123"}`, true)
+	resp.Body.Close()
+	resp = req(t, admin, http.MethodPost, ts.URL+"/api/keys", `{"name":"Friend","allowed_models":["*"],"limits":[]}`, true)
+	var created struct {
+		Secret string  `json:"secret"`
+		Key    keyView `json:"key"`
+	}
+	decode(t, resp, &created)
+
+	keyClient := client(t)
+	resp = req(t, keyClient, http.MethodPost, ts.URL+"/api/login", `{"api_key":"`+created.Secret+`"}`, true)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("key login = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Rotation kills the existing portal session and the old secret.
+	resp = req(t, admin, http.MethodPost, ts.URL+"/api/keys/"+created.Key.ID+"/rotate", "", true)
+	var rotated struct {
+		Secret string `json:"secret"`
+	}
+	decode(t, resp, &rotated)
+	resp = req(t, keyClient, http.MethodGet, ts.URL+"/api/me", "", false)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("portal survived rotation: %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = req(t, keyClient, http.MethodPost, ts.URL+"/api/login", `{"api_key":"`+created.Secret+`"}`, true)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("old secret still works: %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// The new secret works, but disabling the key revokes the session again.
+	resp = req(t, keyClient, http.MethodPost, ts.URL+"/api/login", `{"api_key":"`+rotated.Secret+`"}`, true)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("rotated key login = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = req(t, admin, http.MethodPost, ts.URL+"/api/keys/"+created.Key.ID+"/enabled", `{"enabled":false}`, true)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("disable key = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = req(t, keyClient, http.MethodGet, ts.URL+"/api/me", "", false)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("portal survived disable: %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = req(t, keyClient, http.MethodPost, ts.URL+"/api/login", `{"api_key":"`+rotated.Secret+`"}`, true)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("disabled key login = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}

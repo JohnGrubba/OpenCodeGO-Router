@@ -53,6 +53,18 @@ type Session struct {
 	LastSeen  int64
 }
 
+// KeySession is a browser session for a sub-key owner. It is deliberately
+// separate from admin sessions so a sub-key can never inherit admin access.
+type KeySession struct {
+	Hash      string
+	KeyID     string
+	IP        string
+	UserAgent string
+	CreatedAt int64
+	ExpiresAt int64
+	LastSeen  int64
+}
+
 type Request struct {
 	ID         int64   `json:"id"`
 	KeyID      string  `json:"key_id"`
@@ -188,6 +200,15 @@ CREATE TABLE IF NOT EXISTS key_limits (
 	window_seconds INTEGER NOT NULL,
 	max_value      REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS key_sessions (
+	token_hash TEXT PRIMARY KEY,
+	key_id     TEXT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+	ip         TEXT NOT NULL DEFAULT '',
+	user_agent TEXT NOT NULL DEFAULT '',
+	created_at INTEGER NOT NULL,
+	expires_at INTEGER NOT NULL,
+	last_seen  INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS requests (
 	id            INTEGER PRIMARY KEY AUTOINCREMENT,
 	key_id        TEXT NOT NULL,
@@ -219,6 +240,8 @@ CREATE INDEX IF NOT EXISTS idx_requests_model_created ON requests(model, created
 CREATE INDEX IF NOT EXISTS idx_requests_key_model_created ON requests(key_id, model, created_at);
 CREATE INDEX IF NOT EXISTS idx_requests_created_id ON requests(created_at, id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_key_sessions_expires ON key_sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_key_sessions_key ON key_sessions(key_id);
 `
 
 func Open(path string) (*Store, error) {
@@ -403,6 +426,61 @@ func (s *Store) ClearExpiredSessions(ctx context.Context, now int64) (int64, err
 	return n, nil
 }
 
+// ---- key sessions (sub-key owner portal) ----
+
+func (s *Store) CreateKeySession(ctx context.Context, sess KeySession) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO key_sessions(token_hash,key_id,ip,user_agent,created_at,expires_at,last_seen)
+		VALUES(?,?,?,?,?,?,?)`, sess.Hash, sess.KeyID, sess.IP, sess.UserAgent, sess.CreatedAt, sess.ExpiresAt, sess.CreatedAt)
+	return err
+}
+
+func (s *Store) GetKeySession(ctx context.Context, hash string, now int64) (KeySession, error) {
+	var sess KeySession
+	err := s.db.QueryRowContext(ctx, `SELECT token_hash,key_id,ip,user_agent,created_at,expires_at,last_seen
+		FROM key_sessions WHERE token_hash=? AND expires_at>?`, hash, now).
+		Scan(&sess.Hash, &sess.KeyID, &sess.IP, &sess.UserAgent, &sess.CreatedAt, &sess.ExpiresAt, &sess.LastSeen)
+	if errors.Is(err, sql.ErrNoRows) {
+		return KeySession{}, ErrNotFound
+	}
+	return sess, err
+}
+
+func (s *Store) TouchKeySession(ctx context.Context, hash string, now int64) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_, err := s.db.ExecContext(ctx, "UPDATE key_sessions SET last_seen=? WHERE token_hash=?", now, hash)
+	return err
+}
+
+func (s *Store) DeleteKeySession(ctx context.Context, hash string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_, err := s.db.ExecContext(ctx, "DELETE FROM key_sessions WHERE token_hash=?", hash)
+	return err
+}
+
+// DeleteKeySessionsForKey revokes every portal session for one key. Rotation
+// and disabling call this so an old browser session cannot outlive the secret.
+func (s *Store) DeleteKeySessionsForKey(ctx context.Context, keyID string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_, err := s.db.ExecContext(ctx, "DELETE FROM key_sessions WHERE key_id=?", keyID)
+	return err
+}
+
+func (s *Store) ClearExpiredKeySessions(ctx context.Context, now int64) (int64, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	res, err := s.db.ExecContext(ctx, "DELETE FROM key_sessions WHERE expires_at<?", now)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // ---- keys ----
 
 func scanAllowed(s string) []string {
@@ -474,27 +552,45 @@ func (s *Store) UpdateKey(ctx context.Context, k Key) error {
 func (s *Store) RotateKey(ctx context.Context, id, prefix, hash string) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	res, err := s.db.ExecContext(ctx, "UPDATE api_keys SET prefix=?,hash=? WHERE id=?", prefix, hash, id)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, "UPDATE api_keys SET prefix=?,hash=? WHERE id=?", prefix, hash, id)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	if _, err := tx.ExecContext(ctx, "DELETE FROM key_sessions WHERE key_id=?", id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) SetKeyEnabled(ctx context.Context, id string, enabled bool) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	res, err := s.db.ExecContext(ctx, "UPDATE api_keys SET enabled=? WHERE id=?", boolInt(enabled), id)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, "UPDATE api_keys SET enabled=? WHERE id=?", boolInt(enabled), id)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	if !enabled {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM key_sessions WHERE key_id=?", id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) DeleteKey(ctx context.Context, id string) error {
@@ -878,7 +974,10 @@ func (s *Store) Cleanup(ctx context.Context, now int64, retentionDays int) error
 	if _, err := s.db.ExecContext(ctx, "DELETE FROM requests WHERE created_at<?", cut); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, "DELETE FROM sessions WHERE expires_at<?", now)
+	if _, err := s.db.ExecContext(ctx, "DELETE FROM sessions WHERE expires_at<?", now); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, "DELETE FROM key_sessions WHERE expires_at<?", now)
 	return err
 }
 
@@ -938,6 +1037,24 @@ func (s *Store) ExportRequests(ctx context.Context, from, to int64) ([]Request, 
 		return nil, err
 	}
 	defer rows.Close()
+	return scanRequestRows(rows)
+}
+
+// ExportRequestsForKey is the sub-key owner's scoped equivalent of
+// ExportRequests. The key ID is supplied by the session, never by the client.
+func (s *Store) ExportRequestsForKey(ctx context.Context, keyID string, from, to int64) ([]Request, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,key_id,key_name,model,endpoint,api_family,session_id,ip,user_agent,error,status,stream,
+		input_tokens,output_tokens,reasoning_tokens,cache_read_tokens,cache_write_tokens,
+		cost,allowance,list_cost,estimated,duration_ms,created_at FROM requests
+		WHERE key_id=? AND created_at>=? AND created_at<? ORDER BY id DESC LIMIT 100000`, keyID, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRequestRows(rows)
+}
+
+func scanRequestRows(rows *sql.Rows) ([]Request, error) {
 	out := []Request{}
 	for rows.Next() {
 		var r Request

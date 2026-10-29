@@ -241,6 +241,9 @@ func (s *Server) updateKey(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "Could not update key.")
 		return
 	}
+	if !k.Enabled {
+		_ = s.store.DeleteKeySessionsForKey(ctx, k.ID)
+	}
 	var window int64
 	for _, l := range limits {
 		if l.WindowSeconds > window {
@@ -477,6 +480,104 @@ func fillSeries(points []store.SeriesPoint, from, to, bucket int64) []store.Seri
 	return out
 }
 
+// ---- sub-key owner portal ----
+
+type myModelView struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	APIFamily string `json:"api_family"`
+	Context   int64  `json:"context"`
+}
+
+func (s *Server) myAccount(w http.ResponseWriter, r *http.Request) {
+	key, ok := keyFrom(r.Context())
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "Not signed in.")
+		return
+	}
+	ctx := r.Context()
+	now := time.Now().Unix()
+	usageMap, err := s.store.KeyUsageAll(ctx, now)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "Could not load usage.")
+		return
+	}
+	from := now - 7*86400
+	series, err := s.store.KeySeries(ctx, key.ID, from, now+1, 3*3600)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "Could not load usage.")
+		return
+	}
+	totals, err := s.store.KeyTotals(ctx, key.ID, now-30*86400, now+1)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "Could not load usage.")
+		return
+	}
+	recent, err := s.store.Requests(ctx, store.RequestFilter{KeyID: key.ID, Limit: 50})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "Could not load activity.")
+		return
+	}
+	models := make([]myModelView, 0)
+	for _, m := range s.models.List() {
+		if m.Deprecated || !proxy.ModelAllowed(key.AllowedModels, m.ID) {
+			continue
+		}
+		models = append(models, myModelView{ID: m.ID, Name: m.Name, APIFamily: m.APIFamily, Context: m.Context})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"name":        s.instanceName(ctx),
+		"version":     s.cfg.Version,
+		"key":         s.keyView(ctx, key, now, usageMap[key.ID]),
+		"series":      fillSeries(series, from, now, 3*3600),
+		"totals_30d":  totals,
+		"recent":      recent,
+		"models":      models,
+		"server_time": now,
+	})
+}
+
+func (s *Server) myRequests(w http.ResponseWriter, r *http.Request) {
+	key, ok := keyFrom(r.Context())
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "Not signed in.")
+		return
+	}
+	q := r.URL.Query()
+	f := store.RequestFilter{KeyID: key.ID}
+	f.BeforeID, _ = strconv.ParseInt(q.Get("before"), 10, 64)
+	f.Limit, _ = strconv.Atoi(q.Get("limit"))
+	if f.Limit <= 0 {
+		f.Limit = 50
+	}
+	rows, err := s.store.Requests(r.Context(), f)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "Could not load activity.")
+		return
+	}
+	var next int64
+	if len(rows) == f.Limit && len(rows) > 0 {
+		next = rows[len(rows)-1].ID
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"requests": rows, "next_before": next, "server_time": time.Now().Unix()})
+}
+
+func (s *Server) exportMyCSV(w http.ResponseWriter, r *http.Request) {
+	key, ok := keyFrom(r.Context())
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "Not signed in.")
+		return
+	}
+	now := time.Now().Unix()
+	from, to, _, _ := parseRange(r.URL.Query().Get("range"), now)
+	rows, err := s.store.ExportRequestsForKey(r.Context(), key.ID, from, to)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "Could not export activity.")
+		return
+	}
+	writeCSV(w, rows, "opencode-go-router-my-usage.csv")
+}
+
 func (s *Server) listRequests(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := store.RequestFilter{
@@ -516,12 +617,20 @@ func (s *Server) clearRequests(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) clearExpiredSessions(w http.ResponseWriter, r *http.Request) {
-	deleted, err := s.store.ClearExpiredSessions(r.Context(), time.Now().Unix())
+	now := time.Now().Unix()
+	deleted, err := s.store.ClearExpiredSessions(r.Context(), now)
 	if err != nil {
 		s.log.Error("clear expired sessions failed", "error", err)
 		writeErr(w, http.StatusInternalServerError, "Could not clear expired sessions.")
 		return
 	}
+	keyDeleted, err := s.store.ClearExpiredKeySessions(r.Context(), now)
+	if err != nil {
+		s.log.Error("clear expired key sessions failed", "error", err)
+		writeErr(w, http.StatusInternalServerError, "Could not clear expired sessions.")
+		return
+	}
+	deleted += keyDeleted
 	s.log.Info("expired sessions cleared", "deleted", deleted, "ip", proxy.ClientIP(r, s.cfg.TrustProxy))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": deleted})
 }
@@ -694,8 +803,13 @@ func (s *Server) exportCSV(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "Could not export activity.")
 		return
 	}
+	writeCSV(w, rows, "opencode-go-router-usage.csv")
+}
+
+func writeCSV(w http.ResponseWriter, rows []store.Request, filename string) {
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="opencode-go-router-usage.csv"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	w.Header().Set("Cache-Control", "no-store")
 	cw := csv.NewWriter(w)
 	_ = cw.Write([]string{"timestamp", "key_id", "key_name", "model", "endpoint", "status", "stream", "input_tokens", "output_tokens", "reasoning_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd", "allowance_usd", "list_cost_usd", "estimated", "duration_ms", "session_id", "ip", "error"})
 	for _, row := range rows {
@@ -733,7 +847,7 @@ func csvSafe(s string) string {
 	if s == "" {
 		return ""
 	}
-	if strings.ContainsAny(s[:1], "=+-@") {
+	if strings.ContainsAny(s[:1], "=+-@\t\r\n") {
 		return "'" + s
 	}
 	return s

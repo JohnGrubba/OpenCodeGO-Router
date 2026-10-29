@@ -16,7 +16,10 @@ services:
       DATA_DIR: /data
       ADDR: :4000
     ports:
-      - "4000:4000"
+      # Keep the router on loopback and put TLS in front of it (Caddy, nginx,
+      # Traefik). Set BIND_ADDR=0.0.0.0 only if you intentionally expose the
+      # container directly on the LAN.
+      - "${BIND_ADDR:-127.0.0.1}:4000:4000"
     volumes:
       - router-data:/data
     read_only: true
@@ -26,6 +29,7 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    pids_limit: 512
     stop_grace_period: 30s
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4000/healthz"]

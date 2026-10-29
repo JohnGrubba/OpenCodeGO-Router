@@ -27,6 +27,7 @@ type Config struct {
 	TrustProxy      bool
 	MaxBodyBytes    int64
 	SessionTTL      time.Duration
+	SessionIdle     time.Duration
 	ModelsRefresh   time.Duration
 	LogFormat       string
 	Version         string
@@ -87,6 +88,7 @@ func Load(version string) (Config, error) {
 		TrustProxy:      envBool("TRUST_PROXY", false),
 		MaxBodyBytes:    int64(envInt("MAX_BODY_MB", 64)) << 20,
 		SessionTTL:      time.Duration(envInt("SESSION_TTL_HOURS", 168)) * time.Hour,
+		SessionIdle:     time.Duration(envInt("SESSION_IDLE_HOURS", 24)) * time.Hour,
 		ModelsRefresh:   time.Duration(envInt("MODELS_REFRESH_MINUTES", 15)) * time.Minute,
 		LogFormat:       strings.ToLower(env("LOG_FORMAT", "text")),
 		Version:         version,
@@ -102,6 +104,15 @@ func Load(version string) (Config, error) {
 	}
 	if cfg.SessionTTL < time.Hour {
 		cfg.SessionTTL = 168 * time.Hour
+	}
+	if cfg.SessionTTL > 365*24*time.Hour {
+		cfg.SessionTTL = 365 * 24 * time.Hour
+	}
+	if cfg.SessionIdle < time.Hour {
+		cfg.SessionIdle = 24 * time.Hour
+	}
+	if cfg.SessionIdle > cfg.SessionTTL {
+		cfg.SessionIdle = cfg.SessionTTL
 	}
 	if cfg.ModelsRefresh < time.Minute {
 		cfg.ModelsRefresh = 15 * time.Minute

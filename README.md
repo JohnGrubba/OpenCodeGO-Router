@@ -14,6 +14,7 @@ A self-hosted gateway and dashboard for an **OpenCode Go** subscription. It lets
 ## Features
 
 - **Sub-keys in one click.** `ocgr_…` secrets are shown once and stored only as SHA-256 hashes. The generated client config has the key baked in, so friends do not have to set environment variables.
+- **Self-service usage portal.** Friends can sign in with their `ocgr_…` key on the login page and see their own spend, tokens, rolling limits, model access and recent requests. Key sessions are separate from admin sessions and can never reach the admin API.
 - **Live usage accounting.** Every request records input/output/reasoning/cache tokens, latency, model, status and the exact `opencode.list_cost` reported by Go (the same list price the OpenCode console shows). The discounted `allowance` is stored alongside it.
 - **Rolling limits.** Cap **spend (USD)**, **requests**, or **tokens** over any interval: 5 hours, 24 hours, 7 days, 30 days, or a custom window up to 90 days. Multiple limits per key are combined.
 - **Model allow-lists.** Grant all models, or a hand-picked subset. Enforced before the request reaches the upstream.
@@ -40,6 +41,7 @@ Edit `.env`:
 OPENCODE_API_KEY=oc_sk_...          # from https://opencode.ai/console
 ADMIN_PASSWORD=a-long-password-here # 12+ chars, or leave blank for a generated one
 PUBLIC_URL=http://192.168.1.20:4000 # optional, but set this for friends
+# BIND_ADDR=127.0.0.1               # default; change only for direct LAN exposure
 ```
 
 Then start it:
@@ -49,7 +51,9 @@ docker compose up -d --build
 docker compose logs -f router
 ```
 
-Open `http://<server>:4000`, sign in with `ADMIN_PASSWORD`, and create your first key.
+Open `http://localhost:4000` on the server (or the public URL of your TLS proxy), sign in with `ADMIN_PASSWORD`, and create your first key. Friends can use the same login page with their `ocgr_…` key to see their own usage and limits.
+
+The Compose file publishes port 4000 on **127.0.0.1** by default. Put Caddy, nginx or Traefik in front for TLS. If you deliberately expose the router directly, set `BIND_ADDR=0.0.0.0` in `.env` and use a firewall plus HTTPS wherever possible.
 
 The container uses `restart: unless-stopped`. To make sure Docker itself comes back after a reboot:
 
@@ -131,6 +135,17 @@ X-Goog-Api-Key: ocgr_...      # Gemini clients
 
 Everything else is passed through: `anthropic-version`, `anthropic-beta`, trace headers, tool definitions, images, thinking/reasoning options and streaming.
 
+## Sub-key usage portal
+
+Friends do not need an admin account. On the login page they enter their `ocgr_…` key in the **API key** field (or the admin enters their password in the other field). A key login opens a read-only page with:
+
+- spend, requests and tokens for the last 5h / 24h / 7d / 30d,
+- every rolling limit on the key with used/max and reset times,
+- allowed models, recent requests, average latency and error count,
+- a 30-day CSV export of only that key's activity.
+
+Portal sessions are stored separately from admin sessions, use their own `HttpOnly` cookie, and are revoked when the key is rotated, disabled, expired or deleted. A key session cannot call any `/api/keys`, `/api/settings` or other admin endpoint.
+
 ## How limits work
 
 Limits are **rolling windows** evaluated before every request:
@@ -150,15 +165,17 @@ tokens 2,000,000 / 7d
 
 ## Security
 
-- Sub-keys are 256-bit random secrets; only SHA-256 hashes are stored. Rotation invalidates the old secret immediately.
+- Sub-keys are 256-bit random secrets; only SHA-256 hashes are stored. Rotation invalidates the old secret immediately and signs out any browser portal session for that key.
 - A downloaded client config contains the sub-key in plaintext. Treat it like a password and `chmod 600 ~/.config/opencode/opencode.jsonc`. Finished configs are shown only at creation or rotation because the server cannot recover the secret.
-- Admin passwords use bcrypt. Sessions are random 256-bit tokens stored hashed, sent as `HttpOnly`, `SameSite=Lax` cookies; `Secure` is set automatically on HTTPS.
-- Every mutating admin API call requires a custom CSRF header and a matching `Origin`.
-- Login attempts are throttled per IP. Proxy requests never log prompts or secrets.
-- The container runs as UID 10001 with a read-only root filesystem, all capabilities dropped and `no-new-privileges`.
+- Admin passwords use bcrypt. Sessions are random 256-bit tokens stored hashed, sent as `HttpOnly`, `SameSite=Lax` cookies; `Secure` is set automatically on HTTPS. Admin and API-key portal sessions use separate cookies and separate database tables.
+- API-key portal sessions are read-only, scoped to one key, and re-check the key on every request. Disabling, expiring, deleting or rotating a key revokes portal access immediately.
+- Every mutating admin or portal API call requires a custom CSRF header, a matching `Origin` when present, and a same-origin `Sec-Fetch-Site`.
+- Login attempts are throttled per IP. Admin and API-key logins use separate limiters, so a key brute-force attempt cannot lock out the admin. Proxy requests never log prompts or secrets.
+- Sessions have an absolute lifetime (`SESSION_TTL_HOURS`) and an idle timeout (`SESSION_IDLE_HOURS`). Expired sessions are cleaned up automatically.
+- The container runs as UID 10001 with a read-only root filesystem, all capabilities dropped, `no-new-privileges` and a PID limit. The Compose file binds the port to `127.0.0.1` by default.
 - The master OpenCode key never leaves the server. The dashboard only shows whether it is configured.
 
-For internet exposure, put the router behind a TLS reverse proxy (Caddy, nginx, Traefik), bind the port to localhost (`127.0.0.1:4000:4000`), and set `TRUST_PROXY=true` so client IPs, secure cookies and generated URLs are correct. Example Caddyfile:
+For internet exposure, put the router behind a TLS reverse proxy (Caddy, nginx, Traefik), keep the port bound to localhost (the default), and set `TRUST_PROXY=true` so client IPs, secure cookies and generated URLs are correct. Example Caddyfile:
 
 ```caddyfile
 go.example.com {
@@ -178,9 +195,11 @@ Then set `PUBLIC_URL=https://go.example.com` in `.env` and restart.
 | `PLAN` | `go` | `go` or `go-plus`; used for plan headroom views. |
 | `RETENTION_DAYS` | `180` | Request-log retention (kept at least as long as the longest limit window). |
 | `TRUST_PROXY` | `false` | Trust `X-Forwarded-*` headers. Only enable behind a trusted proxy. |
-| `SESSION_TTL_HOURS` | `168` | Admin session lifetime. |
+| `SESSION_TTL_HOURS` | `168` | Absolute admin and portal session lifetime. |
+| `SESSION_IDLE_HOURS` | `24` | Sign out sessions after this much inactivity (clamped to the absolute lifetime). |
 | `MODELS_REFRESH_MINUTES` | `15` | Live model-list refresh interval. |
 | `MAX_BODY_MB` | `64` | Maximum request body size. |
+| `BIND_ADDR` | `127.0.0.1` | Compose-only: interface that publishes port 4000. Set `0.0.0.0` for direct LAN exposure. |
 | `LOG_FORMAT` | `text` | `text` or `json`. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. |
 | `UPSTREAM_BASE_URL` | `https://opencode.ai/inference` | Upstream host override. |

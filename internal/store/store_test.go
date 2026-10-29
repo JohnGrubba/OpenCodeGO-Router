@@ -165,6 +165,40 @@ func TestSessions(t *testing.T) {
 	}
 }
 
+func TestKeySessions(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	now := time.Now().Unix()
+	if err := st.CreateKey(ctx, Key{ID: "k1", Name: "Friend", Prefix: "p", Hash: "h", Enabled: true, AllowedModels: []string{"*"}, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateKeySession(ctx, KeySession{Hash: "ks", KeyID: "k1", CreatedAt: now, ExpiresAt: now + 60, LastSeen: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.GetKeySession(ctx, "ks", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.GetKeySession(ctx, "ks", now+61); err != ErrNotFound {
+		t.Fatalf("expired key session = %v", err)
+	}
+	if err := st.DeleteKeySessionsForKey(ctx, "k1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.GetKeySession(ctx, "ks", now); err != ErrNotFound {
+		t.Fatalf("key session survived revocation: %v", err)
+	}
+	// Deleting the key must cascade to its portal sessions.
+	if err := st.CreateKeySession(ctx, KeySession{Hash: "ks2", KeyID: "k1", CreatedAt: now, ExpiresAt: now + 60, LastSeen: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteKey(ctx, "k1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.GetKeySession(ctx, "ks2", now); err != ErrNotFound {
+		t.Fatalf("key session survived key deletion: %v", err)
+	}
+}
+
 func TestClearRequestsAndExpiredSessions(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()

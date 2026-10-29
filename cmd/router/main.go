@@ -33,6 +33,9 @@ func main() {
 		os.Exit(1)
 	}
 	log := newLogger(cfg.LogFormat)
+	if strings.HasPrefix(cfg.PublicURL, "https://") && !cfg.TrustProxy {
+		log.Warn("PUBLIC_URL is https but TRUST_PROXY is false; set TRUST_PROXY=true behind a TLS reverse proxy so session cookies are Secure and client IPs are accurate")
+	}
 
 	st, err := store.Open(cfg.DatabasePath)
 	if err != nil {

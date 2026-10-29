@@ -27,14 +27,21 @@ import (
 )
 
 const (
-	sessionCookie = "ocr_session"
-	csrfHeader    = "X-Requested-With"
-	csrfValue     = "OpenCodeRouter"
+	sessionCookie    = "ocr_session"
+	keySessionCookie = "ocr_key_session"
+	csrfHeader       = "X-Requested-With"
+	csrfValue        = "OpenCodeRouter"
 )
 
 type ctxKey int
 
-const sessionContextKey ctxKey = 1
+const (
+	sessionContextKey    ctxKey = 1
+	keySessionContextKey ctxKey = 2
+	keyContextKey        ctxKey = 3
+)
+
+var errKeyInactive = errors.New("api key is disabled or expired")
 
 type Server struct {
 	cfg     config.Config
@@ -45,9 +52,10 @@ type Server struct {
 	log     *slog.Logger
 	started time.Time
 
-	mux    *http.ServeMux
-	assets fs.FS
-	login  *loginLimiter
+	mux      *http.ServeMux
+	assets   fs.FS
+	login    *loginLimiter
+	keyLogin *loginLimiter
 }
 
 func New(cfg config.Config, st *store.Store, tracker *usage.Tracker, ms *models.Service, p *proxy.Proxy, log *slog.Logger) (*Server, error) {
@@ -56,16 +64,17 @@ func New(cfg config.Config, st *store.Store, tracker *usage.Tracker, ms *models.
 		return nil, err
 	}
 	s := &Server{
-		cfg:     cfg,
-		store:   st,
-		tracker: tracker,
-		models:  ms,
-		proxy:   p,
-		log:     log,
-		started: time.Now(),
-		mux:     http.NewServeMux(),
-		assets:  sub,
-		login:   newLoginLimiter(6, 10*time.Minute),
+		cfg:      cfg,
+		store:    st,
+		tracker:  tracker,
+		models:   ms,
+		proxy:    p,
+		log:      log,
+		started:  time.Now(),
+		mux:      http.NewServeMux(),
+		assets:   sub,
+		login:    newLoginLimiter(6, 10*time.Minute),
+		keyLogin: newLoginLimiter(10, 10*time.Minute),
 	}
 	s.routes()
 	return s, nil
@@ -82,6 +91,11 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/session", s.sessionInfo)
 	m.HandleFunc("POST /api/login", s.loginHandler)
 	m.HandleFunc("POST /api/logout", s.logoutHandler)
+
+	// Sub-key owners get a read-only portal scoped to their own key.
+	m.Handle("GET /api/me", s.requireKey(http.HandlerFunc(s.myAccount)))
+	m.Handle("GET /api/me/requests", s.requireKey(http.HandlerFunc(s.myRequests)))
+	m.Handle("GET /api/me/export.csv", s.requireKey(http.HandlerFunc(s.exportMyCSV)))
 
 	admin := http.NewServeMux()
 	admin.HandleFunc("GET /overview", s.overview)
@@ -130,10 +144,14 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
+		h.Set("X-XSS-Protection", "0")
+		h.Set("X-Robots-Tag", "noindex, nofollow, noarchive")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
 		h.Set("Cross-Origin-Opener-Policy", "same-origin")
-		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+		h.Set("Cross-Origin-Resource-Policy", "same-origin")
+		h.Set("X-Permitted-Cross-Domain-Policies", "none")
+		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 		if s.isSecure(r) {
 			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}
@@ -220,6 +238,12 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 			writeErr(w, http.StatusUnauthorized, "Session expired. Sign in again.")
 			return
 		}
+		if s.idleExpired(sess.LastSeen, now) {
+			_ = s.store.DeleteSession(r.Context(), sess.Hash)
+			s.clearSessionCookie(w, r)
+			writeErr(w, http.StatusUnauthorized, "Session timed out. Sign in again.")
+			return
+		}
 		if now-sess.LastSeen > 300 {
 			_ = s.store.TouchSession(r.Context(), sess.Hash, now)
 		}
@@ -229,11 +253,76 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 	})
 }
 
+// requireKey protects the sub-key owner portal. It only accepts a key session
+// cookie and always re-checks the key itself, so disabling, expiring or
+// rotating a key takes effect immediately.
+func (s *Server) requireKey(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.checkCSRF(r) {
+			writeErr(w, http.StatusForbidden, "Request origin could not be verified.")
+			return
+		}
+		if !isReadMethod(r.Method) && !isJSON(r) {
+			writeErr(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json.")
+			return
+		}
+		c, err := r.Cookie(keySessionCookie)
+		if err != nil || c.Value == "" {
+			writeErr(w, http.StatusUnauthorized, "Not signed in.")
+			return
+		}
+		now := time.Now().Unix()
+		sess, key, err := s.loadKeySession(r.Context(), c.Value, now)
+		if err != nil {
+			s.clearKeySessionCookie(w, r)
+			writeErr(w, http.StatusUnauthorized, "Session expired. Sign in again.")
+			return
+		}
+		if s.idleExpired(sess.LastSeen, now) {
+			_ = s.store.DeleteKeySession(r.Context(), sess.Hash)
+			s.clearKeySessionCookie(w, r)
+			writeErr(w, http.StatusUnauthorized, "Session timed out. Sign in again.")
+			return
+		}
+		if now-sess.LastSeen > 300 {
+			_ = s.store.TouchKeySession(r.Context(), sess.Hash, now)
+		}
+		ctx := context.WithValue(r.Context(), keySessionContextKey, sess)
+		ctx = context.WithValue(ctx, keyContextKey, key)
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func (s *Server) idleExpired(lastSeen, now int64) bool {
+	return s.cfg.SessionIdle > 0 && now-lastSeen > int64(s.cfg.SessionIdle.Seconds())
+}
+
+func (s *Server) loadKeySession(ctx context.Context, token string, now int64) (store.KeySession, store.Key, error) {
+	sess, err := s.store.GetKeySession(ctx, auth.HashSecret(token), now)
+	if err != nil {
+		return store.KeySession{}, store.Key{}, err
+	}
+	key, err := s.store.GetKey(ctx, sess.KeyID)
+	if err != nil {
+		return store.KeySession{}, store.Key{}, err
+	}
+	if !key.Enabled || (key.ExpiresAt > 0 && now >= key.ExpiresAt) {
+		return store.KeySession{}, store.Key{}, errKeyInactive
+	}
+	return sess, key, nil
+}
+
 func (s *Server) checkCSRF(r *http.Request) bool {
 	if isReadMethod(r.Method) {
 		return true
 	}
 	if r.Header.Get(csrfHeader) != csrfValue {
+		return false
+	}
+	// Modern browsers label the request context. Reject cross-site and
+	// same-site (for example a compromised sibling subdomain) mutations.
+	if sfs := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site"))); sfs != "" && sfs != "same-origin" && sfs != "none" {
 		return false
 	}
 	if origin := r.Header.Get("Origin"); origin != "" {
@@ -290,22 +379,27 @@ func sessionFrom(ctx context.Context) (store.Session, bool) {
 	return v, ok
 }
 
-func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
+func keyFrom(ctx context.Context) (store.Key, bool) {
+	v, ok := ctx.Value(keyContextKey).(store.Key)
+	return v, ok
+}
+
+func (s *Server) setCookie(w http.ResponseWriter, r *http.Request, name, token string, ttl time.Duration) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
+		Name:     name,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   s.isSecure(r),
 		SameSite: http.SameSiteLaxMode,
-		MaxAge:   int(s.cfg.SessionTTL.Seconds()),
-		Expires:  time.Now().Add(s.cfg.SessionTTL),
+		MaxAge:   int(ttl.Seconds()),
+		Expires:  time.Now().Add(ttl),
 	})
 }
 
-func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+func (s *Server) clearCookie(w http.ResponseWriter, r *http.Request, name string) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
+		Name:     name,
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
@@ -314,6 +408,22 @@ func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   -1,
 		Expires:  time.Unix(0, 0),
 	})
+}
+
+func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
+	s.setCookie(w, r, sessionCookie, token, s.cfg.SessionTTL)
+}
+
+func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+	s.clearCookie(w, r, sessionCookie)
+}
+
+func (s *Server) setKeySessionCookie(w http.ResponseWriter, r *http.Request, token string) {
+	s.setCookie(w, r, keySessionCookie, token, s.cfg.SessionTTL)
+}
+
+func (s *Server) clearKeySessionCookie(w http.ResponseWriter, r *http.Request) {
+	s.clearCookie(w, r, keySessionCookie)
 }
 
 // ---- auth handlers ----
@@ -327,16 +437,32 @@ func (s *Server) loginHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json.")
 		return
 	}
-	ip := proxy.ClientIP(r, s.cfg.TrustProxy)
-	if !s.login.allow(ip) {
-		writeErr(w, http.StatusTooManyRequests, "Too many sign-in attempts. Try again later.")
-		return
-	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	var in struct {
 		Password string `json:"password"`
+		APIKey   string `json:"api_key"`
 	}
 	if err := readJSON(w, r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	in.APIKey = strings.TrimSpace(in.APIKey)
+	ip := proxy.ClientIP(r, s.cfg.TrustProxy)
+	switch {
+	case in.APIKey != "" && in.Password != "":
+		writeErr(w, http.StatusBadRequest, "Enter either an admin password or an API key, not both.")
+	case in.APIKey != "":
+		s.loginWithKey(w, r, ip, in.APIKey)
+	case in.Password != "":
+		s.loginWithPassword(w, r, ip, in.Password)
+	default:
+		writeErr(w, http.StatusBadRequest, "Enter an admin password or an API key.")
+	}
+}
+
+func (s *Server) loginWithPassword(w http.ResponseWriter, r *http.Request, ip, password string) {
+	if !s.login.allow(ip) {
+		writeErr(w, http.StatusTooManyRequests, "Too many sign-in attempts. Try again later.")
 		return
 	}
 	hash, ok, err := s.store.AdminHash(r.Context())
@@ -344,12 +470,15 @@ func (s *Server) loginHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "Admin account is not initialized.")
 		return
 	}
-	if !auth.CheckPassword(hash, in.Password) {
+	if !auth.CheckPassword(hash, password) {
 		s.login.fail(ip)
 		time.Sleep(250 * time.Millisecond)
 		s.log.Warn("failed admin sign-in", "ip", ip)
 		writeErr(w, http.StatusUnauthorized, "Incorrect password.")
 		return
+	}
+	if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
+		_ = s.store.DeleteSession(r.Context(), auth.HashSecret(c.Value))
 	}
 	token, tokenHash, err := auth.NewSessionToken()
 	if err != nil {
@@ -365,9 +494,81 @@ func (s *Server) loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.login.reset(ip)
+	if c, err := r.Cookie(keySessionCookie); err == nil && c.Value != "" {
+		_ = s.store.DeleteKeySession(r.Context(), auth.HashSecret(c.Value))
+	}
+	s.clearKeySessionCookie(w, r)
 	s.setSessionCookie(w, r, token)
 	s.log.Info("admin signed in", "ip", ip)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "role": "admin"})
+}
+
+func (s *Server) loginWithKey(w http.ResponseWriter, r *http.Request, ip, secret string) {
+	if !s.keyLogin.allow(ip) {
+		writeErr(w, http.StatusTooManyRequests, "Too many API key attempts. Try again later.")
+		return
+	}
+	// Reject obvious garbage before touching the database. The real key is a
+	// 256-bit random value, so a short or differently prefixed string can never
+	// be valid.
+	if !strings.HasPrefix(secret, auth.KeyPrefix) || len(secret) < len(auth.KeyPrefix)+20 || len(secret) > 200 {
+		s.keyLogin.fail(ip)
+		time.Sleep(250 * time.Millisecond)
+		s.log.Warn("failed API key sign-in", "ip", ip, "reason", "malformed")
+		writeErr(w, http.StatusUnauthorized, "Invalid API key.")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	key, err := s.store.GetKeyByHash(ctx, auth.HashSecret(secret))
+	cancel()
+	if errors.Is(err, store.ErrNotFound) {
+		s.keyLogin.fail(ip)
+		time.Sleep(250 * time.Millisecond)
+		s.log.Warn("failed API key sign-in", "ip", ip, "reason", "unknown key")
+		writeErr(w, http.StatusUnauthorized, "Invalid API key.")
+		return
+	}
+	if err != nil {
+		s.log.Error("API key sign-in lookup failed", "error", err)
+		writeErr(w, http.StatusInternalServerError, "Could not sign in.")
+		return
+	}
+	now := time.Now().Unix()
+	if !key.Enabled {
+		s.keyLogin.fail(ip)
+		time.Sleep(250 * time.Millisecond)
+		writeErr(w, http.StatusForbidden, "This API key is disabled.")
+		return
+	}
+	if key.ExpiresAt > 0 && now >= key.ExpiresAt {
+		s.keyLogin.fail(ip)
+		time.Sleep(250 * time.Millisecond)
+		writeErr(w, http.StatusForbidden, "This API key has expired.")
+		return
+	}
+	if c, err := r.Cookie(keySessionCookie); err == nil && c.Value != "" {
+		_ = s.store.DeleteKeySession(r.Context(), auth.HashSecret(c.Value))
+	}
+	token, tokenHash, err := auth.NewSessionToken()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "Could not create session.")
+		return
+	}
+	if err := s.store.CreateKeySession(r.Context(), store.KeySession{
+		Hash: tokenHash, KeyID: key.ID, IP: ip, UserAgent: truncate(r.UserAgent(), 300),
+		CreatedAt: now, ExpiresAt: now + int64(s.cfg.SessionTTL.Seconds()), LastSeen: now,
+	}); err != nil {
+		writeErr(w, http.StatusInternalServerError, "Could not create session.")
+		return
+	}
+	s.keyLogin.reset(ip)
+	if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
+		_ = s.store.DeleteSession(r.Context(), auth.HashSecret(c.Value))
+	}
+	s.clearSessionCookie(w, r)
+	s.setKeySessionCookie(w, r, token)
+	s.log.Info("API key owner signed in", "ip", ip, "key_id", key.ID, "name", key.Name)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "role": "key"})
 }
 
 func (s *Server) logoutHandler(w http.ResponseWriter, r *http.Request) {
@@ -378,7 +579,11 @@ func (s *Server) logoutHandler(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
 		_ = s.store.DeleteSession(r.Context(), auth.HashSecret(c.Value))
 	}
+	if c, err := r.Cookie(keySessionCookie); err == nil && c.Value != "" {
+		_ = s.store.DeleteKeySession(r.Context(), auth.HashSecret(c.Value))
+	}
 	s.clearSessionCookie(w, r)
+	s.clearKeySessionCookie(w, r)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -388,11 +593,40 @@ func (s *Server) sessionInfo(w http.ResponseWriter, r *http.Request) {
 		"name":          s.instanceName(r.Context()),
 		"version":       s.cfg.Version,
 	}
+	now := time.Now().Unix()
 	if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
-		if _, err := s.store.GetSession(r.Context(), auth.HashSecret(c.Value), time.Now().Unix()); err == nil {
-			resp["authenticated"] = true
-			resp["plan"] = s.plan(r.Context())
-			resp["upstream"] = s.cfg.APIKey != ""
+		if sess, err := s.store.GetSession(r.Context(), auth.HashSecret(c.Value), now); err == nil {
+			if s.idleExpired(sess.LastSeen, now) {
+				_ = s.store.DeleteSession(r.Context(), sess.Hash)
+				s.clearSessionCookie(w, r)
+			} else {
+				resp["authenticated"] = true
+				resp["role"] = "admin"
+				resp["plan"] = s.plan(r.Context())
+				resp["upstream"] = s.cfg.APIKey != ""
+				writeJSON(w, http.StatusOK, resp)
+				return
+			}
+		} else {
+			s.clearSessionCookie(w, r)
+		}
+	}
+	if c, err := r.Cookie(keySessionCookie); err == nil && c.Value != "" {
+		if sess, key, err := s.loadKeySession(r.Context(), c.Value, now); err == nil {
+			if s.idleExpired(sess.LastSeen, now) {
+				_ = s.store.DeleteKeySession(r.Context(), sess.Hash)
+				s.clearKeySessionCookie(w, r)
+			} else {
+				resp["authenticated"] = true
+				resp["role"] = "key"
+				resp["key"] = map[string]any{
+					"id":     key.ID,
+					"name":   key.Name,
+					"prefix": key.Prefix,
+				}
+			}
+		} else {
+			s.clearKeySessionCookie(w, r)
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -575,12 +809,17 @@ func readJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return fmt.Errorf("request body is too large")
+		}
 		if errors.Is(err, io.EOF) {
 			return fmt.Errorf("request body is empty")
 		}
 		return fmt.Errorf("invalid JSON request body")
 	}
-	if dec.More() {
+	// Reject trailing data instead of silently accepting the first object.
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return fmt.Errorf("request body must contain a single JSON object")
 	}
 	return nil
@@ -611,6 +850,7 @@ func (l *loginLimiter) allow(ip string) bool {
 	defer l.mu.Unlock()
 	now := time.Now()
 	cut := now.Add(-l.window)
+	l.pruneLocked(cut)
 	old := l.attempts[ip]
 	kept := old[:0]
 	for _, t := range old {
@@ -632,4 +872,18 @@ func (l *loginLimiter) reset(ip string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.attempts, ip)
+}
+
+// pruneLocked keeps the limiter from growing without bound when an exposed
+// instance sees many distinct source addresses. The map is only swept once it
+// is large, so the normal path stays cheap.
+func (l *loginLimiter) pruneLocked(cut time.Time) {
+	if len(l.attempts) < 10000 {
+		return
+	}
+	for ip, times := range l.attempts {
+		if len(times) == 0 || !times[len(times)-1].After(cut) {
+			delete(l.attempts, ip)
+		}
+	}
 }

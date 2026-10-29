@@ -13,16 +13,23 @@
 <body>
   <div id="login" class="login" hidden>
     <div class="login-glow"></div>
-    <main class="login-card">
+    <main class="login-card" id="login-card">
       <div class="brand-mark" aria-hidden="true">
         <svg viewBox="0 0 32 32"><path d="M8 6l8 4.6L24 6v13.2L16 24l-8-4.8V6z"/><path d="M16 10.6V24"/></svg>
       </div>
       <h1 id="login-title">OpenCode Go Router</h1>
-      <p class="login-sub" id="login-sub">Sign in to manage keys and usage.</p>
+      <p class="login-sub" id="login-sub">Sign in with the admin password or your API key.</p>
       <form id="login-form" autocomplete="on">
-        <div class="field">
-          <label for="password">Admin password</label>
-          <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+        <div class="login-fields">
+          <div class="field">
+            <label for="password">Admin password</label>
+            <input id="password" name="password" type="password" autocomplete="current-password" maxlength="200" autofocus>
+          </div>
+          <div class="login-divider" aria-hidden="true"><span>or</span></div>
+          <div class="field">
+            <label for="api-key">API key</label>
+            <input id="api-key" name="api_key" type="password" autocomplete="off" spellcheck="false" maxlength="200" placeholder="ocgr_…">
+          </div>
         </div>
         <button class="btn primary full" id="login-btn" type="submit">Sign in</button>
         <div class="form-error" id="login-error" role="alert"></div>
@@ -92,6 +99,30 @@
         <span id="uptime-label"></span>
       </footer>
     </div>
+  </div>
+
+  <div id="portal" class="portal" hidden>
+    <header class="portal-top">
+      <div class="brand">
+        <div class="brand-mark small" aria-hidden="true">
+          <svg viewBox="0 0 32 32"><path d="M8 6l8 4.6L24 6v13.2L16 24l-8-4.8V6z"/><path d="M16 10.6V24"/></svg>
+        </div>
+        <div class="brand-text">
+          <strong id="portal-name">Go Router</strong>
+          <span>My usage</span>
+        </div>
+      </div>
+      <div class="portal-actions">
+        <span class="badge accent" id="portal-plan">API key</span>
+        <button class="btn ghost small" id="portal-refresh" type="button">Refresh</button>
+        <button class="btn ghost small" id="portal-logout" type="button">Sign out</button>
+      </div>
+    </header>
+    <main class="portal-main" id="portal-view"></main>
+    <footer class="footer portal-foot">
+      <span><span id="portal-instance">OpenCode Go Router</span> <span id="portal-version"></span></span>
+      <span>Read-only view for your API key</span>
+    </footer>
   </div>
 
   <div id="modal-root"></div>

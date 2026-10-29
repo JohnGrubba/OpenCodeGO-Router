@@ -14,6 +14,7 @@
     keySearch: '',
     activity: { key: '', model: '', status: '', rows: [], next: 0, loaded: false },
     charts: 0,
+    portal: null,
   };
 
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -222,8 +223,12 @@
       const sess = await fetch('/api/session', { credentials: 'same-origin' }).then((r) => r.json());
       state.session = sess;
       if (sess.authenticated) {
-        state.plan = sess.plan || 'go';
-        await enterApp();
+        if (sess.role === 'key') {
+          await enterPortal();
+        } else {
+          state.plan = sess.plan || 'go';
+          await enterApp();
+        }
       } else {
         showLogin();
         $('#login-title').textContent = sess.name || 'OpenCode Go Router';
@@ -237,6 +242,10 @@
   function bindShell() {
     $('#login-form').addEventListener('submit', onLogin);
     $('#logout-btn').addEventListener('click', onLogout);
+    $('#portal-logout').addEventListener('click', onLogout);
+    $('#portal-refresh').addEventListener('click', () => {
+      renderPortal().catch((ex) => { if (ex.message !== 'Session expired') toast(ex.message, 'error'); });
+    });
     window.addEventListener('hashchange', route);
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') closeModal();
@@ -248,16 +257,32 @@
     const btn = $('#login-btn');
     const err = $('#login-error');
     err.textContent = '';
+    const password = $('#password').value;
+    const apiKey = $('#api-key').value.trim();
+    if (!password && !apiKey) {
+      err.textContent = 'Enter an admin password or an API key.';
+      $('#password').focus();
+      return;
+    }
+    if (password && apiKey) {
+      err.textContent = 'Enter either an admin password or an API key, not both.';
+      return;
+    }
     btn.disabled = true;
     btn.textContent = 'Signing in…';
     try {
-      await api('/login', { method: 'POST', body: { password: $('#password').value }, login: true });
-      state.session = { authenticated: true };
+      const res = await api('/login', { method: 'POST', body: { password, api_key: apiKey }, login: true });
+      state.session = { authenticated: true, role: res.role || 'admin' };
       $('#password').value = '';
-      await enterApp();
+      $('#api-key').value = '';
+      if (state.session.role === 'key') {
+        await enterPortal();
+      } else {
+        await enterApp();
+      }
     } catch (ex) {
       err.textContent = ex.message;
-      $('#password').select();
+      (apiKey ? $('#api-key') : $('#password')).select();
     } finally {
       btn.disabled = false;
       btn.textContent = 'Sign in';
@@ -269,13 +294,19 @@
     state.session = null;
     state.settings = null;
     state.models = null;
+    state.portal = null;
+    const portalView = $('#portal-view');
+    if (portalView) portalView.innerHTML = '';
     showLogin();
     location.hash = '';
   }
 
   async function enterApp() {
     $('#login').hidden = true;
+    $('#portal').hidden = true;
     $('#app').hidden = false;
+    $('#portal-view').innerHTML = '';
+    state.portal = null;
     try {
       await loadSettings(true);
     } catch (ex) {
@@ -285,9 +316,30 @@
     await route();
   }
 
+  async function enterPortal() {
+    $('#login').hidden = true;
+    $('#app').hidden = true;
+    $('#portal').hidden = false;
+    $('#view').innerHTML = '';
+    $('#topbar-actions').innerHTML = '';
+    state.settings = null;
+    state.models = null;
+    try {
+      await renderPortal();
+    } catch (ex) {
+      if (ex.message === 'Session expired') return;
+      renderPortalError(ex);
+    }
+  }
+
   function showLogin() {
     $('#app').hidden = true;
+    $('#portal').hidden = true;
     $('#login').hidden = false;
+    $('#view').innerHTML = '';
+    $('#topbar-actions').innerHTML = '';
+    $('#portal-view').innerHTML = '';
+    document.title = 'OpenCode Go Router';
     const card = $('#login-card');
     if (card) card.classList.remove('hidden');
     setTimeout(() => $('#password')?.focus(), 30);
@@ -312,6 +364,148 @@
     return state.models;
   }
 
+  // ---------- sub-key owner portal ----------
+  function renderPortalError(ex) {
+    $('#portal-view').innerHTML = `<div class="card"><div class="empty">
+      <div class="empty-icon">${icon('alert')}</div>
+      <h3>Could not load your usage</h3>
+      <p>${esc(ex.message || 'Unknown error')}</p>
+      <button class="btn" data-portal-retry>Try again</button>
+    </div></div>`;
+    $('[data-portal-retry]').addEventListener('click', () => enterPortal());
+  }
+
+  async function renderPortal() {
+    const data = await api('/me');
+    state.portal = data;
+    const k = data.key || {};
+    const usage = k.usage || {};
+    const totals = data.totals_30d || {};
+    const models = data.models || [];
+    const modelNames = new Map(models.map((m) => [m.id, m.name]));
+    const instance = data.name || 'OpenCode Go Router';
+    const portalModel = (id) => modelNames.get(id) || id;
+    $('#portal-name').textContent = instance;
+    $('#portal-instance').textContent = instance;
+    $('#portal-version').textContent = data.version ? 'v' + data.version : '';
+    document.title = instance + ' — My usage';
+
+    const usageCard = (label, u, accent = false) => `<div class="card stat-card${accent ? ' accent' : ''}">
+      <div class="stat-label">${esc(label)}</div>
+      <div class="stat-value">${fmtMoney(u.cost)}</div>
+      <div class="stat-sub">${fmtNum(u.requests)} requests · ${fmtTokens(u.tokens)} tokens</div>
+    </div>`;
+
+    const limitsHTML = k.limits && k.limits.length ? k.limits.map((l) => {
+      const p = pct(l.used, l.max);
+      return `<div class="limit-row">
+        <div class="limit-top"><span>${metricLabel(l.metric)} / ${windowLabel(l.window_seconds)}</span><span class="limit-value">${fmtLimit(l.used, l.metric)} / ${fmtLimit(l.max, l.metric)}</span></div>
+        <div class="bar ${barClass(p)}"><span style="width:${p.toFixed(1)}%"></span></div>
+        <div class="tiny faint">${p >= 100 ? `Blocked${l.reset_at ? ' · resets ' + relTime(l.reset_at) : ''}` : `${Math.round(p)}% used${l.reset_at ? ' · frees up ' + relTime(l.reset_at) : ''}`}</div>
+      </div>`;
+    }).join('') : '<div class="muted small">No limits configured. Your key can use the full plan.</div>';
+
+    const allowed = k.allowed_models || [];
+    const modelAccess = allowed.includes('*')
+      ? `<span class="badge accent">All models</span><div class="tiny faint" style="margin-top:8px">${models.length} models currently available</div>`
+      : `<div class="chips">${allowed.map((m) => `<span class="chip">${esc(portalModel(m))}</span>`).join('')}</div>`;
+
+    const recent = data.recent || [];
+    const recentHTML = recent.length ? `<div class="table-wrap"><table>
+      <thead><tr><th>Time</th><th>Model</th><th>Status</th><th class="num">Tokens</th><th class="num">Spend</th><th class="num">Latency</th></tr></thead>
+      <tbody>${recent.map((r) => `<tr class="${r.status >= 400 ? 'error-row' : ''}" ${r.error ? `title="${esc(r.error)}"` : ''}>
+        <td class="muted nowrap">${fmtDateTime(r.created_at)}</td>
+        <td>${esc(portalModel(r.model))}</td>
+        <td>${requestStatus(r)}</td>
+        <td class="num">${fmtTokens((r.input_tokens || 0) + (r.output_tokens || 0) + (r.cache_read_tokens || 0) + (r.cache_write_tokens || 0))}</td>
+        <td class="num">${fmtMoney(r.cost)}${r.estimated ? '<div class="tiny color-warn">est.</div>' : ''}</td>
+        <td class="num muted">${fmtDur(r.duration_ms)}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>` : emptyState('No requests yet', 'Requests appear here as soon as this key is used.');
+
+    const series = data.series || [];
+    $('#portal-view').innerHTML = `<div class="stack">
+      <div class="hero-row">
+        <div>
+          <div class="hero-title"><h2>${esc(k.name)}</h2>${statusBadge(k.status)}</div>
+          <div class="hero-meta">
+            <span class="mono">${esc(k.prefix)}…</span>
+            <span>Created ${fmtDate(k.created_at)}</span>
+            <span>Last used ${relTime(k.last_used_at)}</span>
+            <span>${k.expires_at ? 'Expires ' + fmtDate(k.expires_at) : 'No expiry'}</span>
+          </div>
+          ${k.note ? `<div class="muted small" style="margin-top:8px">${esc(k.note)}</div>` : ''}
+        </div>
+        <div class="row">
+          <a class="btn" href="/api/me/export.csv?range=30d">${icon('download')} Export CSV</a>
+        </div>
+      </div>
+
+      ${k.blocked ? `<div class="callout warn">${icon('alert')}<div><strong>Limit reached.</strong> New requests are blocked until a limit window frees up. See the limits panel below.</div></div>` : ''}
+
+      <div class="grid stats">
+        ${usageCard('Last 5 hours', usage.h5 || {}, true)}
+        ${usageCard('Last 24 hours', usage.d1 || {})}
+        ${usageCard('Last 7 days', usage.d7 || {})}
+        ${usageCard('Last 30 days', usage.d30 || {})}
+      </div>
+
+      <div class="detail-grid">
+        <div class="stack">
+          <div class="card">
+            <div class="chart-head">
+              <div><div class="card-title">Spend over the last 7 days</div><div class="card-sub">Charged against this key</div></div>
+              <div class="chart-max">${fmtMoney(totals.cost)} in 30 days</div>
+            </div>
+            ${chartHTML(series)}
+            <div class="chart-x"><span>${fmtTimeShort(series[0]?.t || Date.now() / 1000, true)}</span><span>${fmtTimeShort(series[Math.floor(series.length / 2)]?.t || Date.now() / 1000, true)}</span><span>${fmtTimeShort(series[series.length - 1]?.t || Date.now() / 1000, true)}</span></div>
+          </div>
+
+          <div class="card pad-0">
+            <div class="row between" style="padding:16px 18px;border-bottom:1px solid var(--border)">
+              <div><div class="card-title">Recent requests</div><div class="card-sub">Latest activity for this key</div></div>
+            </div>
+            ${recentHTML}
+          </div>
+        </div>
+
+        <div class="stack">
+          <div class="card">
+            <div class="card-head"><div><div class="card-title">Limits</div><div class="card-sub">Rolling windows, all enforced</div></div></div>
+            ${limitsHTML}
+          </div>
+
+          <div class="card">
+            <div class="card-head"><div><div class="card-title">Usage in the last 30 days</div><div class="card-sub">Tokens reported by Go</div></div></div>
+            <div class="grid cols-3">
+              <div class="stat-mini"><span class="k">Input</span><span class="v">${fmtTokens(totals.input_tokens)}</span></div>
+              <div class="stat-mini"><span class="k">Output</span><span class="v">${fmtTokens(totals.output_tokens)}</span></div>
+              <div class="stat-mini"><span class="k">Cache read</span><span class="v">${fmtTokens(totals.cache_read_tokens)}</span></div>
+              <div class="stat-mini"><span class="k">Cache write</span><span class="v">${fmtTokens(totals.cache_write_tokens)}</span></div>
+              <div class="stat-mini"><span class="k">Requests</span><span class="v">${fmtNum(totals.requests)}</span></div>
+              <div class="stat-mini"><span class="k">Errors</span><span class="v">${fmtNum(totals.errors)}</span></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-title" style="margin-bottom:10px">Model access</div>
+            ${modelAccess}
+          </div>
+
+          <div class="card">
+            <div class="card-title" style="margin-bottom:8px">Details</div>
+            <div class="kv"><span class="k">Prefix</span><span class="v mono">${esc(k.prefix)}…</span></div>
+            <div class="kv"><span class="k">Created</span><span class="v">${fmtDateTime(k.created_at)}</span></div>
+            <div class="kv"><span class="k">Expires</span><span class="v">${k.expires_at ? fmtDateTime(k.expires_at) : 'Never'}</span></div>
+            <div class="kv"><span class="k">Avg. latency</span><span class="v">${Math.round(totals.avg_duration_ms || 0)} ms</span></div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+
+    bindChart();
+  }
+
   // ---------- routing ----------
   const pages = {
     overview: ['Overview', 'Usage'],
@@ -322,7 +516,7 @@
   };
 
   async function route() {
-    if (!state.session || !state.session.authenticated) return;
+    if (!state.session || !state.session.authenticated || state.session.role === 'key') return;
     const raw = location.hash.replace(/^#\/?/, '');
     const parts = raw.split('/').filter(Boolean);
     const name = parts[0] || 'overview';

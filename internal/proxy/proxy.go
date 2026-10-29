@@ -42,18 +42,19 @@ type Proxy struct {
 
 func New(cfg config.Config, st *store.Store, tracker *usage.Tracker, ms *models.Service, log *slog.Logger) *Proxy {
 	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          256,
-		MaxIdleConnsPerHost:   64,
-		MaxConnsPerHost:       0,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   15 * time.Second,
-		ResponseHeaderTimeout: 5 * time.Minute,
-		ExpectContinueTimeout: 1 * time.Second,
-		WriteBufferSize:       32 << 10,
-		ReadBufferSize:        32 << 10,
+		Proxy:                  http.ProxyFromEnvironment,
+		DialContext:            (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:      true,
+		MaxIdleConns:           256,
+		MaxIdleConnsPerHost:    64,
+		MaxConnsPerHost:        0,
+		IdleConnTimeout:        90 * time.Second,
+		TLSHandshakeTimeout:    15 * time.Second,
+		ResponseHeaderTimeout:  5 * time.Minute,
+		ExpectContinueTimeout:  1 * time.Second,
+		WriteBufferSize:        32 << 10,
+		ReadBufferSize:         32 << 10,
+		MaxResponseHeaderBytes: 1 << 20,
 	}
 	return &Proxy{
 		cfg:     cfg,
@@ -61,7 +62,12 @@ func New(cfg config.Config, st *store.Store, tracker *usage.Tracker, ms *models.
 		tracker: tracker,
 		models:  ms,
 		log:     log,
-		client:  &http.Client{Transport: transport},
+		client: &http.Client{
+			Transport: transport,
+			// The upstream API should never redirect. Refusing redirects avoids
+			// turning a compromised or misconfigured upstream into an SSRF hop.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 		touched: make(map[string]int64),
 	}
 }
@@ -200,8 +206,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	upstream, err := p.forward(r, canonical, body, requestID, key.ID, session)
 	if err != nil {
 		p.log.Warn("upstream request failed", "request_id", requestID, "key", key.Prefix, "model", model, "error", err)
-		writeError(w, family, http.StatusBadGateway, "Upstream request failed: "+err.Error(), "upstream_error")
-		p.record(r, key, canonical, family, model, session, http.StatusBadGateway, nil, err.Error(), start, false)
+		writeError(w, family, http.StatusBadGateway, "Upstream request failed.", "upstream_error")
+		p.record(r, key, canonical, family, model, session, http.StatusBadGateway, nil, "upstream request failed", start, false)
 		return
 	}
 	defer upstream.Body.Close()
@@ -368,9 +374,12 @@ func (p *Proxy) readRequestBody(r *http.Request) ([]byte, error) {
 			return nil, fmt.Errorf("invalid gzip request body")
 		}
 		defer zr.Close()
-		out, err := io.ReadAll(io.LimitReader(zr, p.cfg.MaxBodyBytes))
+		out, err := io.ReadAll(io.LimitReader(zr, p.cfg.MaxBodyBytes+1))
 		if err != nil {
 			return nil, fmt.Errorf("invalid gzip request body")
+		}
+		if int64(len(out)) > p.cfg.MaxBodyBytes {
+			return nil, fmt.Errorf("request body too large (limit %d MB)", p.cfg.MaxBodyBytes>>20)
 		}
 		return out, nil
 	default:
@@ -586,7 +595,14 @@ func copyResponseHeaders(dst, src http.Header) {
 	for k, vals := range src {
 		switch http.CanonicalHeaderKey(k) {
 		case "Connection", "Proxy-Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
-			"Te", "Trailer", "Transfer-Encoding", "Upgrade", "Content-Length", "Content-Encoding", "Set-Cookie":
+			"Te", "Trailer", "Transfer-Encoding", "Upgrade", "Content-Length", "Content-Encoding", "Set-Cookie",
+			// Never let an upstream response override the router's browser
+			// hardening or grant cross-origin access to proxied data.
+			"Content-Security-Policy", "Content-Security-Policy-Report-Only", "X-Frame-Options",
+			"X-Content-Type-Options", "Strict-Transport-Security", "Referrer-Policy", "Permissions-Policy",
+			"Cross-Origin-Opener-Policy", "Cross-Origin-Resource-Policy", "Cross-Origin-Embedder-Policy",
+			"Access-Control-Allow-Origin", "Access-Control-Allow-Credentials", "Access-Control-Allow-Headers",
+			"Access-Control-Allow-Methods", "Access-Control-Expose-Headers":
 			continue
 		}
 		for _, v := range vals {
@@ -711,23 +727,47 @@ func ClientIP(r *http.Request, trustProxy bool) string {
 			if i := strings.IndexByte(xff, ','); i >= 0 {
 				xff = xff[:i]
 			}
-			if s := strings.TrimSpace(xff); s != "" {
-				return s
+			if ip := cleanIP(xff); ip != "" {
+				return ip
 			}
 		}
-		if xr := strings.TrimSpace(r.Header.Get("X-Real-Ip")); xr != "" {
-			return xr
+		if ip := cleanIP(r.Header.Get("X-Real-Ip")); ip != "" {
+			return ip
 		}
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		if ip := cleanIP(host); ip != "" {
+			return ip
+		}
+		return host
 	}
-	return host
+	if ip := cleanIP(r.RemoteAddr); ip != "" {
+		return ip
+	}
+	return r.RemoteAddr
+}
+
+// cleanIP normalises a forwarded address and rejects malformed values so a
+// spoofed header cannot inject arbitrary text into logs or bypass per-IP
+// throttling with junk values.
+func cleanIP(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(v); err == nil {
+		v = host
+	}
+	v = strings.Trim(v, "[]")
+	if ip := net.ParseIP(v); ip != nil {
+		return ip.String()
+	}
+	return ""
 }
 
 func writeError(w http.ResponseWriter, family string, status int, message, code string) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	var payload any
 	switch family {
